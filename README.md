@@ -62,10 +62,46 @@ How it works:
 Workers need the page to be served over HTTP. Opened from `file://`, the simulations run on the main thread instead.
 This is slower, but it works.
 
+## Accuracy (backtest)
+
+`scripts/backtest.js` replays every fixture of a real season (`E0.csv` is the 2025-26 Premier League, from
+football-data.co.uk). It plays each fixture 400 times to get home/draw/away probabilities, then scores them against
+the real results, the bookmakers' closing odds and two naive baselines. The scores are ranked probability score (RPS)
+and log loss, where lower is better, plus the share of results picked correctly.
+
+The engine's tuning knobs (`OF.Match.TUNING` in `js/engine.js`) were fitted on the **first half** of the season
+only. Results on the **second half**, which the tuning never saw:
+
+| Model | RPS ↓ | Log loss ↓ | Picks right |
+|---|---|---|---|
+| Bookmakers (closing odds) | 0.2089 | 1.048 | 45.3% |
+| **Match engine (tuned)** | **0.2202** | **1.081** | **40.0%** |
+| Always predict the season average | 0.2245 | 1.090 | 39.5% |
+| Coin flip | 0.2269 | 1.099 | 39.5% |
+| Match engine (before tuning) | 0.2333 | 1.132 | 40.5% |
+
+Before tuning, the engine was badly overconfident and scored worse than a coin flip. After tuning it beats both naive
+baselines on unseen matches but is still clearly behind the betting market. Over the whole season it matches the real
+outcome mix (44/25/31% home/draw/away vs 43/27/30% real) and goals (2.65 vs 2.75 per match). Ranked by expected
+points, its table has a rank correlation of 0.73 with the real one (the bookmakers manage 0.77).
+
+Caveats:
+- **Hindsight in the ratings.** FC 27 ratings were published after this season, so they partly reflect it. That
+  flatters the engine.
+- **Squads have moved on.** The ratings describe the squads after the summer 2026 transfers, not the 2025-26 ones.
+- **One season is a small sample.** 190 held-out matches is enough to see big effects, not small ones.
+
+```sh
+node scripts/backtest.js                                  # full report: scores, calibration, expected-points table
+node scripts/backtest.js --half 2 --sims 400              # held-out half only
+node scripts/backtest.js --half 1 --summary --set duel=32,homeAdvantage=5   # one-line result for parameter sweeps
+```
+
 ## Command line
 
 ```sh
 node scripts/simulate.js "Real Madrid" "FC Barcelona"          # one match with commentary
 node scripts/simulate.js "Chelsea|Premier League" "Arsenal" 42 # "|League" disambiguates, 42 = seed
 node scripts/simulate.js --calibrate 500                       # aggregate stats across random matches
+node scripts/season.js "Premier League" --runs 1000            # predict a season: title / top 4 / relegation odds
 ```

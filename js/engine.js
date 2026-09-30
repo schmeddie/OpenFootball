@@ -9,7 +9,19 @@
   const quietCommentary = () => QUIET || (QUIET = Object.fromEntries(Object.keys(OF.commentary).map((k) => [k, () => ''])));
 
   const MAX_SUBS = 5;
-  const DUEL = 24; // attribute points per unit of log-odds in a duel
+  // Calibration knobs, fitted against real results (see scripts/backtest.js).
+  const TUNING = {
+    duel: 40, // attribute points per unit of log-odds in a duel (higher = skill matters less)
+    possessionScale: 20, // same idea for who controls each minute
+    finishScale: 70, // shooter-vs-keeper skill gap per unit of log goal probability
+    attackRate: 0.55, // base chance a minute of possession becomes an attack
+    involveExp: 2, // how strongly the most skilled players dominate the ball
+    homeAdvantage: 5, // control points added to the home side
+    xgMult: 1, // scales the quality of every chance
+    formSd: 0, // per-match form: spread of a random multiplier on each team's ability
+    gameState: 0.08, // how much a lead makes teams sit back (and a late level score makes them cautious)
+  };
+  const T = TUNING;
   const SUB_WINDOWS = 3;
 
   // ---- Skill composites -----------------------------------------------------
@@ -45,10 +57,10 @@
     buildUp: { GK: 0.15, CB: 0.7, LB: 0.8, RB: 0.8, LWB: 0.9, RWB: 0.9, CDM: 1.3, CM: 1.5, CAM: 1.1, LM: 0.9, RM: 0.9, LW: 0.5, RW: 0.5, CF: 0.6, ST: 0.3 },
     press: { CB: 0.3, LB: 0.4, RB: 0.4, LWB: 0.6, RWB: 0.6, CDM: 1.5, CM: 1.3, CAM: 0.7, LM: 0.8, RM: 0.8, LW: 0.5, RW: 0.5, CF: 0.5, ST: 0.4 },
     create: { CB: 0.1, LB: 0.3, RB: 0.3, LWB: 0.4, RWB: 0.4, CDM: 0.5, CM: 1.1, CAM: 1.6, LM: 0.9, RM: 0.9, LW: 1.0, RW: 1.0, CF: 1.2, ST: 0.5 },
-    run: { LB: 0.1, RB: 0.1, LWB: 0.2, RWB: 0.2, CM: 0.3, CAM: 0.7, LM: 0.7, RM: 0.7, LW: 1.2, RW: 1.2, CF: 1.3, ST: 1.6 },
+    run: { LB: 0.1, RB: 0.1, LWB: 0.2, RWB: 0.2, CM: 0.3, CAM: 0.8, LM: 0.8, RM: 0.8, LW: 1.25, RW: 1.25, CF: 1.3, ST: 1.3 },
     dribble: { LB: 0.3, RB: 0.3, LWB: 0.5, RWB: 0.5, CDM: 0.1, CM: 0.4, CAM: 1.0, LM: 1.1, RM: 1.1, LW: 1.5, RW: 1.5, CF: 1.2, ST: 1.0 },
     cross: { LB: 0.9, RB: 0.9, LWB: 1.2, RWB: 1.2, CM: 0.2, CAM: 0.2, LM: 1.4, RM: 1.4, LW: 1.2, RW: 1.2 },
-    aerial: { CB: 0.35, CDM: 0.2, CM: 0.3, CAM: 0.4, LM: 0.3, RM: 0.3, LW: 0.4, RW: 0.4, CF: 0.9, ST: 1.6 },
+    aerial: { CB: 0.35, CDM: 0.2, CM: 0.3, CAM: 0.4, LM: 0.3, RM: 0.3, LW: 0.45, RW: 0.45, CF: 0.9, ST: 1.3 },
     longShot: { CB: 0.1, LB: 0.15, RB: 0.15, CDM: 0.5, CM: 1.0, CAM: 1.2, LM: 0.6, RM: 0.6, LW: 0.8, RW: 0.8, CF: 1.0, ST: 0.7 },
     defend: { CB: 1.6, LB: 1.0, RB: 1.0, LWB: 0.9, RWB: 0.9, CDM: 1.0, CM: 0.4, CAM: 0.1, LM: 0.3, RM: 0.3 },
     defendAerial: { CB: 1.8, LB: 0.5, RB: 0.5, LWB: 0.4, RWB: 0.4, CDM: 0.8, CM: 0.3, ST: 0.2 },
@@ -71,6 +83,12 @@
       this.minute = 0;
       this.half = 1;
       this.stoppage = [this.rng.int(1, 4), this.rng.int(2, 6), this.rng.int(0, 2), this.rng.int(1, 3)];
+      // Each team's form on the day: everything the ratings can't know
+      // (tactics, confidence, niggles, luck), as a multiplier on ability.
+      for (const side of this.sides) {
+        const g = Math.sqrt(-2 * Math.log(1 - this.rng())) * Math.cos(2 * Math.PI * this.rng());
+        side.form = clamp(1 + g * T.formSd, 0.85, 1.15);
+      }
       this.shootout = null;
       this.finished = false;
       this.events = [];
@@ -155,7 +173,7 @@
       const nat = r.p.posRatings[r.p.pos] || r.p.ovr;
       const fit = r.role ? r.p.posRatings[r.role] / Math.max(1, nat) : 1;
       const fitMult = clamp(0.55 + 0.45 * fit, 0.7, 1.02);
-      return fatigue * fitMult;
+      return fatigue * fitMult * this.sides[r.side].form;
     }
 
     // Skill composite before fatigue/position scaling. Depends only on the
@@ -196,7 +214,7 @@
       return this.rng.weighted(list, (r) => {
         if (r === exclude) return 0;
         const x = this.skill(r, skillName) / 60;
-        return (table[r.role] || 0.05) * x * x * x;
+        return (table[r.role] || 0.05) * (T.involveExp === 3 ? x * x * x : x ** T.involveExp);
       });
     }
 
@@ -275,15 +293,21 @@
       this.tickFatigue();
 
       // Who dominates the ball this minute.
-      const adv = this.homeAdvantage ? 1.5 : 0;
+      const adv = this.homeAdvantage ? T.homeAdvantage : 0;
       const ch = this.control(h) + adv;
       const ca = this.control(a);
-      const pHome = logistic(((ch - ca) + (this.teamPress(h) - this.teamPress(a)) * 0.35) / 20);
+      const pHome = logistic(((ch - ca) + (this.teamPress(h) - this.teamPress(a)) * 0.35) / T.possessionScale);
       const att = this.rng.chance(pHome) ? h : a;
       const def = att === h ? a : h;
       att.stats.possession++;
       this.passingTick(att, def);
-      const attackRate = 0.55 + (this.control(att) - this.control(def)) / 300;
+      let attackRate = T.attackRate + (this.control(att) - this.control(def)) / 300;
+      // Game state: leaders protect what they have, trailing sides push on,
+      // and level games get cagey late on.
+      const lead = att.score - def.score;
+      if (lead > 0) attackRate -= T.gameState * Math.min(lead, 2);
+      else if (lead < 0) attackRate += T.gameState * 0.5;
+      else if (this.minute >= 70) attackRate -= T.gameState * 0.5;
       if (this.rng.chance(clamp(attackRate, 0.4, 0.68))) this.attack(att, def);
       else this.quietMinute(att, def);
 
@@ -394,7 +418,7 @@
       // 1. Build-up through midfield.
       const passer = this.choose(att, 'buildUp', 'pass');
       const presser = this.choose(def, 'press', 'press');
-      const pBuild = logistic(0.95 + (this.skill(passer, 'pass') * 0.7 + this.skill(passer, 'retain') * 0.3 - this.skill(presser, 'press')) / DUEL);
+      const pBuild = logistic(0.95 + (this.skill(passer, 'pass') * 0.7 + this.skill(passer, 'retain') * 0.3 - this.skill(presser, 'press')) / T.duel);
       if (!this.rng.chance(pBuild)) {
         if (this.rng.chance(0.3)) {
           this.commitFoul(presser, passer, def, att, 'midfield');
@@ -434,7 +458,7 @@
       if (!runner) return;
       const defender = this.choose(def, 'defend', 'line');
       const a = this.skill(creator, 'create') * 0.5 + this.skill(runner, 'run') * 0.5;
-      const p = logistic(-0.55 + (a - this.skill(defender, 'line')) / DUEL);
+      const p = logistic(-0.55 + (a - this.skill(defender, 'line')) / T.duel);
       if (this.rng.chance(p)) {
         creator.st.keyPasses++;
         defender.st.beaten++;
@@ -455,7 +479,7 @@
       const dribbler = this.choose(att, 'dribble', 'dribble');
       const defender = this.choose(def, 'defend', 'tackle');
       dribbler.st.dribbles++;
-      const p = logistic(-0.35 + (this.skill(dribbler, 'dribble') - this.skill(defender, 'tackle')) / DUEL);
+      const p = logistic(-0.35 + (this.skill(dribbler, 'dribble') - this.skill(defender, 'tackle')) / T.duel);
       if (this.rng.chance(p)) {
         dribbler.st.dribblesOk++;
         defender.st.beaten++;
@@ -508,7 +532,7 @@
         return;
       }
       const defender = this.choose(def, 'defendAerial', 'aerialDef');
-      const p = logistic(-0.3 + (this.skill(target, 'aerialAtt') - this.skill(defender, 'aerialDef')) / DUEL);
+      const p = logistic(-0.3 + (this.skill(target, 'aerialAtt') - this.skill(defender, 'aerialDef')) / T.duel);
       if (this.rng.chance(p)) {
         target.st.aerialsWon++;
         crosser.st.keyPasses++;
@@ -539,7 +563,7 @@
         return;
       }
       const delivery = logistic(0.6 + (this.skill(taker, 'cross') - 58) / 14);
-      const p = delivery * logistic(-0.2 + (this.skill(target, 'aerialAtt') - this.skill(defender, 'aerialDef')) / DUEL);
+      const p = delivery * logistic(-0.2 + (this.skill(target, 'aerialAtt') - this.skill(defender, 'aerialDef')) / T.duel);
       if (this.rng.chance(p)) {
         target.st.aerialsWon++;
         this.shoot(att, def, target, taker, 0.05 + this.rng() * 0.1, 'header');
@@ -672,6 +696,7 @@
       const gk = this.keeper(def);
       const skillName = { normal: 'finish', oneOnOne: 'finish', header: 'headerShot', long: 'longShot', freeKick: 'freeKick' }[kind];
       const gkSkillName = { normal: 'gkShot', oneOnOne: 'gkOneOnOne', header: 'gkShot', long: 'gkShot', freeKick: 'gkShot' }[kind];
+      xg *= T.xgMult;
       const S = this.skill(shooter, skillName);
       const G = this.skill(gk, gkSkillName);
       att.stats.shots++;
@@ -692,7 +717,7 @@
         }
       }
 
-      const pGoal = clamp(xg * Math.exp((S - G + 4) / 45), 0.005, 0.85);
+      const pGoal = clamp(xg * Math.exp((S - G + 4) / T.finishScale), 0.005, 0.85);
       const pOnTarget = clamp(0.3 + (S - 55) / 110 + xg * 0.6, 0.2, 0.9);
       const r = this.rng();
       if (r < pGoal) {
@@ -947,5 +972,6 @@
     }
   }
 
+  Match.TUNING = TUNING;
   OF.Match = Match;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
