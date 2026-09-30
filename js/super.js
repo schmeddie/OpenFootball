@@ -532,7 +532,7 @@
         <b>${fmtInt(run.done)}</b> / ${fmtInt(run.total)} ${unitFor(run.job)}
         <span>${fmtInt(matches)} matches simulated</span>
         <span>${fmtInt(rate)} matches/s</span>
-        <span>${run.mainThread ? 'main thread (open via a web server to use workers)' : `${run.workers} workers`}</span>
+        <span>${run.mainThread ? '<span class="warn">1 core only: open the app with start.bat (or start.sh) to use all cores</span>' : `${run.workers} workers`}</span>
         <span>${run.done ? `~${fmtDuration(left)} left` : 'starting…'}</span>`;
     }
     if (run.done < run.total) setTimeout(tickProgress, 250);

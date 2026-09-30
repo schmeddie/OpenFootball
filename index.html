@@ -26,8 +26,11 @@
     <!-- Shown if players.csv can't be fetched (e.g. opened via file://). -->
     <section id="loader" class="card loader hidden">
       <h2>Load the player database</h2>
-      <p>The app couldn't fetch <code>players.csv</code> automatically. Serve the folder over HTTP
-        (for example <code>python3 -m http.server</code>) or pick the file below.</p>
+      <p>It looks like <code>index.html</code> was opened straight from disk, so the browser won't let the page read
+        <code>players.csv</code> by itself.</p>
+      <p><b>Easiest:</b> close this tab and double-click <code>start.bat</code> (Windows) or run <code>./start.sh</code>
+        (Mac/Linux) in the OpenFootball folder. Everything then loads automatically, and the Supercomputer can use all your CPU cores.</p>
+      <p>Or pick the file below to carry on here. It works, but the Supercomputer will run on one core, so it's much slower.</p>
       <label class="btn primary file-btn">Choose players.csv<input id="csv-file" type="file" accept=".csv,text/csv"></label>
     </section>
 

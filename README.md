@@ -8,14 +8,15 @@ resolved from the players' attributes.
 
 ## Running it
 
-The app is plain HTML/CSS/JS with no build step. Serve the folder over HTTP so the browser can load `players.csv`:
+The app is plain HTML/CSS/JS with no build step. It needs to be served over HTTP, so that the browser lets it load
+`players.csv` and run simulations on all CPU cores:
 
-```sh
-python3 -m http.server 8000
-# open http://localhost:8000
-```
+- **Windows:** double-click `start.bat`. It starts a small local web server using PowerShell, which comes with
+  Windows, so nothing needs installing, and opens the app in your browser. Keep the window open while you use it.
+- **Mac/Linux:** run `./start.sh` (needs Python 3), or `python3 -m http.server 8000` and open http://localhost:8000.
 
-If you open `index.html` directly from disk, the app asks you to choose `players.csv` manually.
+If you open `index.html` directly from disk instead, the app asks you to choose `players.csv` manually and the
+Supercomputer runs on a single core.
 
 ## Features
 
