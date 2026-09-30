@@ -15,8 +15,16 @@
     ]),
     halftime: (m) => `Half-time: ${scoreLine(m)}.`,
     secondHalf: (m) => pick(m, ['The second half is under way.', 'We go again - second half.', 'Back out for the second 45.']),
+    extraTime: (m) => `End of normal time: ${scoreLine(m)}. We're going to extra time!`,
+    extraTimeSecondHalf: (m) => `Into the second period of extra time. ${scoreLine(m)}.`,
+    shootoutStart: (m) => `Still level after 120 minutes - this will be settled by a penalty shootout!`,
+    shootoutKick: (m, t, gk, scored, score) => `${scored ? 'Scored' : pick(m, ['Saved', 'Missed', 'Saved'])}: ${n(t)}${scored ? '' : ` (${n(gk)})`}. Shootout ${score[0]}-${score[1]}.`,
     fulltime: (m) => {
       const [h, a] = m.sides;
+      if (m.shootout) {
+        const w = m.sides[m.shootout.winner];
+        return `Full-time: ${scoreLine(m)} after extra time. ${w.name} win ${Math.max(...m.shootout.score)}-${Math.min(...m.shootout.score)} on penalties!`;
+      }
       if (h.score === a.score) return `Full-time: ${scoreLine(m)}. The points are shared.`;
       const w = h.score > a.score ? h : a;
       return `Full-time: ${scoreLine(m)}. ${w.name} take the win!`;

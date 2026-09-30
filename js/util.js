@@ -17,20 +17,24 @@
     rng.chance = (p) => rng() < p;
     rng.pick = (arr) => arr[Math.floor(rng() * arr.length)];
     // Pick an item with probability proportional to weightFn(item).
+    let ws = new Float64Array(32);
     rng.weighted = (arr, weightFn) => {
+      const n = arr.length;
+      if (n > ws.length) ws = new Float64Array(n * 2);
       let total = 0;
-      const ws = arr.map((x) => {
-        const w = Math.max(0, weightFn(x));
+      for (let i = 0; i < n; i++) {
+        const w = Math.max(0, weightFn(arr[i]));
+        ws[i] = w;
         total += w;
-        return w;
-      });
-      if (total <= 0) return arr.length ? rng.pick(arr) : undefined;
-      let r = rng() * total;
-      for (let i = 0; i < arr.length; i++) {
-        r -= ws[i];
-        if (r <= 0) return arr[i];
       }
-      return arr[arr.length - 1];
+      if (total <= 0) return n ? rng.pick(arr) : undefined;
+      let r = rng() * total;
+      for (let i = 0; i < n; i++) {
+        r -= ws[i];
+        if (r <= 0 && ws[i] > 0) return arr[i];
+      }
+      for (let i = n - 1; i >= 0; i--) if (ws[i] > 0) return arr[i];
+      return arr[n - 1];
     };
     return rng;
   }

@@ -35,6 +35,33 @@ If you open `index.html` directly from disk, the app asks you to choose `players
   team stats, xG and a Player of the Match.
 - **Seeds**: every match is reproducible. Enter the seed shown at full time to replay it.
 
+## Supercomputer mode
+
+The **Supercomputer** tab replays the same competition thousands of times and reports how often each outcome happens.
+
+| Mode | Simulates | Reports |
+|---|---|---|
+| Head-to-head | The fixture set up on the Match tab, with your lineups. Optionally a knockout tie with extra time and penalties. | Win/draw/loss %, fair odds, scoreline heatmap, average stats, anytime-scorer % and average rating per player |
+| League season | Any set of teams (a real league, or a mix from anywhere), playing home and away or once | Average points and position, title / top-N / relegation %, a finishing-position grid per team, Golden Boot odds, a sample season |
+| Knockout cup | Any number of teams with a random or seeded draw, byes if needed, extra time and penalties | Chance of reaching each round, most likely finals, top-scorer odds |
+
+How it works:
+
+- **Independent runs.** Each run (one match, season or tournament) gets its own seed, derived from the job seed and
+  the run number. The same seed always gives the same results, however the work is split.
+- **Parallel workers.** Runs are handed out in small batches to Web Workers, one per CPU core less one, capped at 8.
+  Each worker returns counters (wins, points, finishing positions, goals per player and so on). The page merges them
+  and redraws the results as they arrive, so you see provisional numbers converge while it runs. You can cancel at
+  any point and keep the partial results.
+- **Fast mode.** Bulk matches skip commentary and the event log. Player skill composites are cached. A match takes
+  about 2 ms of CPU, so 1,000 Premier League seasons (380,000 matches) take around 1–2 minutes on an 8-core machine.
+- **Fixed lineups.** Teams use their best auto-picked formation, XI and bench, or your custom lineup if the team is
+  set up on the Match tab. There's no fatigue carried between matches, no squad rotation and no injuries lasting
+  beyond a match.
+
+Workers need the page to be served over HTTP. Opened from `file://`, the simulations run on the main thread instead.
+This is slower, but it works.
+
 ## Command line
 
 ```sh

@@ -40,6 +40,7 @@
     $('#db-status').title = `Parsed in ${ms} ms`;
     $('#loader').classList.add('hidden');
     $('#setup').classList.remove('hidden');
+    $('#nav').classList.remove('hidden');
     const saved = loadPrefs();
     const defaults = ['Real Madrid|LALIGA EA SPORTS', 'FC Barcelona|LALIGA EA SPORTS'];
     for (const i of [0, 1]) {
@@ -48,6 +49,7 @@
       setTeam(i, team, saved && saved.formations && saved.formations[i]);
     }
     bindSetup();
+    document.dispatchEvent(new CustomEvent('of:db', { detail: state.db }));
   }
 
   function loadPrefs() {
@@ -511,6 +513,32 @@
     document.querySelectorAll('#rating-tabs .tab').forEach((t) => t.classList.toggle('active', t === b));
     if (state.match) renderLiveRatings(state.match);
   });
+
+  // ---- Views ----------------------------------------------------------------------
+  function showView(view) {
+    document.querySelectorAll('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+    $('#super').classList.toggle('hidden', view !== 'super');
+    $('#setup').classList.toggle('hidden', view !== 'match' || !!state.match);
+    $('#match').classList.toggle('hidden', view !== 'match' || !state.match);
+    if (view === 'super') document.dispatchEvent(new CustomEvent('of:super-shown'));
+  }
+  $('#nav').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (b) showView(b.dataset.view);
+  });
+
+  // Used by supercomputer mode to reuse the Match tab's teams and lineups.
+  OF.app = {
+    sides: () => state.sides,
+    swapSides() {
+      state.sides.reverse();
+      state.selected = null;
+      renderPanel(0);
+      renderPanel(1);
+      savePrefs();
+    },
+    showView,
+  };
 
   init();
 })();

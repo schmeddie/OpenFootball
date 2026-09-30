@@ -4,7 +4,9 @@
 (function (root) {
   const OF = (root.OF = root.OF || {});
   const { makeRng, clamp, logistic, blend } = OF.util;
-  const C = () => OF.commentary;
+  // Fast mode swaps commentary for no-ops: bulk simulations only need results.
+  let QUIET = null;
+  const quietCommentary = () => QUIET || (QUIET = Object.fromEntries(Object.keys(OF.commentary).map((k) => [k, () => ''])));
 
   const MAX_SUBS = 5;
   const DUEL = 24; // attribute points per unit of log-odds in a duel
@@ -53,14 +55,23 @@
   };
 
   class Match {
-    constructor({ home, away, seed, homeAdvantage = true }) {
+    // fast: skip commentary and the event log (results and stats are unaffected
+    // in distribution, though a seed won't replay the same match in both modes).
+    // knockout: a draw goes to extra time and then penalties.
+    constructor({ home, away, seed, homeAdvantage = true, fast = false, knockout = false }) {
       this.seed = seed >>> 0;
+      this.fast = fast;
+      this.knockout = knockout;
+      this.C = fast ? quietCommentary() : OF.commentary;
+      this.tick = 0; // bumps every simulated minute; invalidates per-minute caches
+      this.ver = 0; // bumps whenever who's on the pitch (or where) changes
       this.rng = makeRng(this.seed);
       this.homeAdvantage = homeAdvantage;
       this.sides = [this.buildSide(home, 0), this.buildSide(away, 1)];
       this.minute = 0;
       this.half = 1;
-      this.stoppage = [this.rng.int(1, 4), this.rng.int(2, 6)];
+      this.stoppage = [this.rng.int(1, 4), this.rng.int(2, 6), this.rng.int(0, 2), this.rng.int(1, 3)];
+      this.shootout = null;
       this.finished = false;
       this.events = [];
       this.goals = [];
@@ -82,6 +93,8 @@
         injured: false,
         subbedOn: false,
         subbedOff: false,
+        mult: 1,
+        multKey: -1,
         st: {
           goals: 0, assists: 0, shots: 0, sot: 0, xg: 0, keyPasses: 0, passes: 0, passOk: 0,
           dribbles: 0, dribblesOk: 0, tackles: 0, interceptions: 0, clearances: 0, blocks: 0,
@@ -110,12 +123,26 @@
     }
 
     // ---- Helpers --------------------------------------------------------------
+    // Call whenever players come on/off or change role.
+    lineupChanged() {
+      this.ver++;
+    }
+
     onPitch(side) {
-      return side.players.filter((r) => r.onPitch);
+      if (side.cacheVer !== this.ver) this.refreshLists(side);
+      return side.cacheOn;
     }
 
     outfield(side) {
-      return this.onPitch(side).filter((r) => r.role !== 'GK');
+      if (side.cacheVer !== this.ver) this.refreshLists(side);
+      return side.cacheOut;
+    }
+
+    refreshLists(side) {
+      side.cacheOn = side.players.filter((r) => r.onPitch);
+      side.cacheOut = side.cacheOn.filter((r) => r.role !== 'GK');
+      side.cacheInv = {};
+      side.cacheVer = this.ver;
     }
 
     keeper(side) {
@@ -131,26 +158,68 @@
       return fatigue * fitMult;
     }
 
-    skill(r, name) {
-      const [weights, styles] = SKILLS[name];
-      let v = blend(r.p.a, weights);
-      for (const s of styles) if (r.p.ps[s]) v += r.p.ps[s] * 2;
-      if (name === 'dribble') v += (r.p.skillMoves - 3) * 1.5;
-      if ((name === 'finish' || name === 'longShot') && r.p.ps.Gamechanger && this.minute >= 75) v += 2;
-      return v * this.formMult(r);
+    // Skill composite before fatigue/position scaling. Depends only on the
+    // player, so it's cached on the player and shared across matches.
+    baseSkill(r, name) {
+      const cache = r.p.skillCache || (r.p.skillCache = {});
+      let v = cache[name];
+      if (v === undefined) {
+        const [weights, styles] = SKILLS[name];
+        v = blend(r.p.a, weights);
+        for (const s of styles) if (r.p.ps[s]) v += r.p.ps[s] * 2;
+        if (name === 'dribble') v += (r.p.skillMoves - 3) * 1.5;
+        cache[name] = v;
+      }
+      return v;
     }
 
+    skill(r, name) {
+      let v = this.baseSkill(r, name);
+      if ((name === 'finish' || name === 'longShot') && r.p.ps.Gamechanger && this.minute >= 75) v += 2;
+      // Energy only changes once per minute and roles only on lineup changes.
+      const key = this.tick * 1000 + this.ver;
+      if (r.multKey !== key) {
+        r.mult = this.formMult(r);
+        r.multKey = key;
+      }
+      return v * r.mult;
+    }
+
+    // Weighted pick of who gets involved: role involvement x skill^3.
     choose(side, involveKey, skillName, exclude) {
-      const pool = this.outfield(side).filter((r) => r !== exclude);
       const table = INVOLVE[involveKey];
-      let list = pool.filter((r) => (table[r.role] || 0) > 0);
-      if (!list.length) list = pool.length ? pool : this.onPitch(side);
-      return this.rng.weighted(list, (r) => (table[r.role] || 0.05) * Math.pow(this.skill(r, skillName) / 60, 3));
+      let list = this.involved(side, involveKey);
+      if (!list.length || (list.length === 1 && list[0] === exclude)) {
+        list = this.outfield(side);
+        if (!list.length || (list.length === 1 && list[0] === exclude)) list = this.onPitch(side);
+      }
+      return this.rng.weighted(list, (r) => {
+        if (r === exclude) return 0;
+        const x = this.skill(r, skillName) / 60;
+        return (table[r.role] || 0.05) * x * x * x;
+      });
+    }
+
+    involved(side, involveKey) {
+      if (side.cacheVer !== this.ver) this.refreshLists(side);
+      let list = side.cacheInv[involveKey];
+      if (!list) {
+        const table = INVOLVE[involveKey];
+        list = side.cacheInv[involveKey] = side.cacheOut.filter((r) => (table[r.role] || 0) > 0);
+      }
+      return list;
     }
 
     // Team strength in possession: involvement-weighted passing/retention of
     // the current outfielders, scaled down when a side is short of men.
     control(side) {
+      const key = this.tick * 1000 + this.ver;
+      if (side.ctrlKey === key) return side.ctrl;
+      side.ctrlKey = key;
+      return (side.ctrl = this.computeControl(side));
+    }
+
+    computeControl(side) {
       const list = this.outfield(side);
       let s = 0;
       let w = 0;
@@ -163,6 +232,13 @@
     }
 
     teamPress(side) {
+      const key = this.tick * 1000 + this.ver;
+      if (side.pressKey === key) return side.press;
+      side.pressKey = key;
+      return (side.press = this.computePress(side));
+    }
+
+    computePress(side) {
       const list = this.outfield(side);
       if (!list.length) return 40;
       const w = list.reduce((s, r) => s + (INVOLVE.press[r.role] || 0.2), 0);
@@ -173,10 +249,13 @@
     minuteLabel() {
       if (this.half === 1 && this.minute > 45) return `45+${this.minute - 45}`;
       if (this.half === 2 && this.minute > 90) return `90+${this.minute - 90}`;
+      if (this.half === 3 && this.minute > 105) return `105+${this.minute - 105}`;
+      if (this.half === 4 && this.minute > 120) return `120+${this.minute - 120}`;
       return String(this.minute);
     }
 
     emit(type, side, text, extra = {}) {
+      if (this.fast) return null;
       const ev = { minute: this.minuteLabel(), type, side, text, score: [this.sides[0].score, this.sides[1].score], ...extra };
       this.events.push(ev);
       this.out.push(ev);
@@ -189,9 +268,10 @@
       if (this.finished) return this.out;
       if (this.minute === 0) {
         this.minute = 1;
-        this.emit('kickoff', null, C().kickoff(this));
+        this.emit('kickoff', null, this.C.kickoff(this));
       }
       const [h, a] = this.sides;
+      this.tick++;
       this.tickFatigue();
 
       // Who dominates the ball this minute.
@@ -223,15 +303,32 @@
       const end1 = 45 + this.stoppage[0];
       const end2 = 90 + this.stoppage[1];
       if (this.half === 1 && this.minute >= end1) {
-        this.emit('halftime', null, C().halftime(this));
+        this.emit('halftime', null, this.C.halftime(this));
         this.half = 2;
         this.minute = 46;
         for (const s of this.sides) for (const r of this.onPitch(s)) r.energy = Math.min(100, r.energy + 6);
         this.halftimeSubs();
-        this.emit('kickoff', null, C().secondHalf(this));
+        this.emit('kickoff', null, this.C.secondHalf(this));
         return;
       }
       if (this.half === 2 && this.minute >= end2) {
+        if (this.knockout && this.sides[0].score === this.sides[1].score) {
+          this.emit('halftime', null, this.C.extraTime(this));
+          this.half = 3;
+          this.minute = 91;
+          return;
+        }
+        this.finish();
+        return;
+      }
+      if (this.half === 3 && this.minute >= 105 + this.stoppage[2]) {
+        this.half = 4;
+        this.minute = 106;
+        this.emit('kickoff', null, this.C.extraTimeSecondHalf(this));
+        return;
+      }
+      if (this.half === 4 && this.minute >= 120 + this.stoppage[3]) {
+        if (this.sides[0].score === this.sides[1].score) this.penaltyShootout();
         this.finish();
         return;
       }
@@ -288,7 +385,7 @@
       }
       if (this.rng.chance(0.2)) {
         const r = this.choose(att, 'buildUp', 'pass');
-        this.emit('flavour', att.idx, C().possession(this, att, r));
+        this.emit('flavour', att.idx, this.C.possession(this, att, r));
       }
     }
 
@@ -306,12 +403,12 @@
         if (this.rng.chance(0.5)) {
           presser.st.interceptions++;
           passer.st.dispossessed++;
-          if (this.rng.chance(0.35)) this.emit('turnover', def.idx, C().interception(this, presser, passer));
+          if (this.rng.chance(0.35)) this.emit('turnover', def.idx, this.C.interception(this, presser, passer));
         } else {
           presser.st.tackles++;
           def.stats.tackles++;
           passer.st.dispossessed++;
-          if (this.rng.chance(0.35)) this.emit('turnover', def.idx, C().tackleMid(this, presser, passer));
+          if (this.rng.chance(0.35)) this.emit('turnover', def.idx, this.C.tackleMid(this, presser, passer));
         }
         return;
       }
@@ -342,15 +439,15 @@
         creator.st.keyPasses++;
         defender.st.beaten++;
         const xg = 0.12 + this.rng() * 0.24;
-        this.emit('chance', att.idx, C().throughBall(this, creator, runner));
+        this.emit('chance', att.idx, this.C.throughBall(this, creator, runner));
         this.shoot(att, def, runner, creator, xg, 'oneOnOne');
       } else if (this.rng.chance(0.45)) {
         runner.st.offsides++;
         att.stats.offsides++;
-        this.emit('offside', att.idx, C().offside(this, runner, creator));
+        this.emit('offside', att.idx, this.C.offside(this, runner, creator));
       } else {
         defender.st.interceptions++;
-        if (this.rng.chance(0.5)) this.emit('defence', def.idx, C().cutOut(this, defender, creator, runner));
+        if (this.rng.chance(0.5)) this.emit('defence', def.idx, this.C.cutOut(this, defender, creator, runner));
       }
     }
 
@@ -362,13 +459,13 @@
       if (this.rng.chance(p)) {
         dribbler.st.dribblesOk++;
         defender.st.beaten++;
-        this.emit('chance', att.idx, C().dribblePast(this, dribbler, defender));
+        this.emit('chance', att.idx, this.C.dribblePast(this, dribbler, defender));
         // Sometimes the dribbler squares it, otherwise shoots.
         if (this.rng.chance(0.3)) {
           const mate = this.choose(att, 'run', 'finish', dribbler);
           if (mate) {
             dribbler.st.keyPasses++;
-            this.emit('chance', att.idx, C().layOff(this, dribbler, mate));
+            this.emit('chance', att.idx, this.C.layOff(this, dribbler, mate));
             this.shoot(att, def, mate, dribbler, 0.08 + this.rng() * 0.2, 'normal');
             return;
           }
@@ -385,7 +482,7 @@
           defender.st.tackles++;
           def.stats.tackles++;
           dribbler.st.dispossessed++;
-          this.emit('defence', def.idx, C().tackle(this, defender, dribbler));
+          this.emit('defence', def.idx, this.C.tackle(this, defender, dribbler));
           if (this.rng.chance(0.2)) this.corner(att, def);
         }
       }
@@ -398,7 +495,7 @@
         const d = this.choose(def, 'defendAerial', 'aerialDef');
         d.st.clearances++;
         if (this.rng.chance(0.4)) return this.corner(att, def);
-        if (this.rng.chance(0.4)) this.emit('defence', def.idx, C().badCross(this, crosser, d));
+        if (this.rng.chance(0.4)) this.emit('defence', def.idx, this.C.badCross(this, crosser, d));
         return;
       }
       const target = this.choose(att, 'aerial', 'aerialAtt', crosser);
@@ -407,7 +504,7 @@
       // Keeper comes for it?
       if (this.rng.chance(0.04 + (this.skill(gk, 'gkCross') - 60) / 450)) {
         gk.st.clearances++;
-        this.emit('defence', def.idx, C().claim(this, gk, crosser));
+        this.emit('defence', def.idx, this.C.claim(this, gk, crosser));
         return;
       }
       const defender = this.choose(def, 'defendAerial', 'aerialDef');
@@ -415,13 +512,13 @@
       if (this.rng.chance(p)) {
         target.st.aerialsWon++;
         crosser.st.keyPasses++;
-        this.emit('chance', att.idx, C().cross(this, crosser, target));
+        this.emit('chance', att.idx, this.C.cross(this, crosser, target));
         this.shoot(att, def, target, crosser, 0.06 + this.rng() * 0.14, 'header');
       } else {
         defender.st.aerialsWon++;
         defender.st.clearances++;
         if (this.rng.chance(0.5)) return this.corner(att, def);
-        if (this.rng.chance(0.5)) this.emit('defence', def.idx, C().headedClear(this, defender, crosser));
+        if (this.rng.chance(0.5)) this.emit('defence', def.idx, this.C.headedClear(this, defender, crosser));
       }
     }
 
@@ -433,12 +530,12 @@
     corner(att, def) {
       att.stats.corners++;
       const taker = this.bestAt(att, (r) => this.skill(r, 'cross') + (r.p.ps['Dead Ball'] || 0) * 3);
-      this.emit('corner', att.idx, C().corner(this, att, taker));
+      this.emit('corner', att.idx, this.C.corner(this, att, taker));
       const target = this.choose(att, 'aerial', 'aerialAtt', taker);
       const defender = this.choose(def, 'defendAerial', 'aerialDef');
       const gk = this.keeper(def);
       if (this.rng.chance(0.06 + (this.skill(gk, 'gkCross') - 60) / 400)) {
-        this.emit('defence', def.idx, C().claim(this, gk, taker));
+        this.emit('defence', def.idx, this.C.claim(this, gk, taker));
         return;
       }
       const delivery = logistic(0.6 + (this.skill(taker, 'cross') - 58) / 14);
@@ -449,7 +546,7 @@
       } else {
         defender.st.clearances++;
         defender.st.aerialsWon++;
-        if (this.rng.chance(0.4)) this.emit('defence', def.idx, C().cornerCleared(this, defender));
+        if (this.rng.chance(0.4)) this.emit('defence', def.idx, this.C.cornerCleared(this, defender));
       }
     }
 
@@ -468,7 +565,7 @@
       if (where === 'box') pYellow += 0.1;
       if (fouler.yellow) pYellow *= 0.45; // booked players ease off
       const pRed = where === 'midfield' ? 0.001 : 0.004 + (where === 'box' ? 0.01 : 0);
-      this.emit('foul', def.idx, C().foul(this, fouler, victim, where));
+      this.emit('foul', def.idx, this.C.foul(this, fouler, victim, where));
       if (this.rng.chance(pRed)) this.sendOff(fouler, def, false);
       else if (this.rng.chance(clamp(pYellow, 0.03, 0.5))) this.book(fouler, def);
 
@@ -483,21 +580,22 @@
       r.yellow++;
       side.stats.yellows++;
       if (r.yellow >= 2) {
-        this.emit('yellow', side.idx, C().secondYellow(this, r), { player: r.p.name });
+        this.emit('yellow', side.idx, this.C.secondYellow(this, r), { player: r.p.name });
         this.sendOff(r, side, true);
       } else {
-        this.emit('yellow', side.idx, C().yellow(this, r), { player: r.p.name });
+        this.emit('yellow', side.idx, this.C.yellow(this, r), { player: r.p.name });
       }
     }
 
     sendOff(r, side, second) {
       r.sentOff = true;
       r.onPitch = false;
+      this.lineupChanged();
       r.minuteOff = this.minute;
       side.stats.reds++;
       r.st.red = 1;
-      if (!second) this.emit('red', side.idx, C().red(this, r), { player: r.p.name });
-      else this.emit('red', side.idx, C().redAfterSecond(this, r), { player: r.p.name });
+      if (!second) this.emit('red', side.idx, this.C.red(this, r), { player: r.p.name });
+      else this.emit('red', side.idx, this.C.redAfterSecond(this, r), { player: r.p.name });
       if (r.role === 'GK') this.replaceKeeper(side);
     }
 
@@ -515,7 +613,8 @@
       if (stand) {
         stand.role = 'GK';
         stand.group = 'GK';
-        this.emit('info', side.idx, C().emergencyKeeper(this, stand));
+        this.lineupChanged();
+        this.emit('info', side.idx, this.C.emergencyKeeper(this, stand));
       }
     }
 
@@ -524,18 +623,18 @@
       const direct = this.rng.chance(0.55);
       if (direct) {
         const dist = this.rng.int(18, 32);
-        this.emit('freekick', att.idx, C().freeKick(this, att, taker, dist));
+        this.emit('freekick', att.idx, this.C.freeKick(this, att, taker, dist));
         const xg = clamp(0.1 - (dist - 18) * 0.005, 0.03, 0.1);
         this.shoot(att, def, taker, null, xg, 'freeKick');
       } else {
-        this.emit('freekick', att.idx, C().freeKickCross(this, att, taker));
+        this.emit('freekick', att.idx, this.C.freeKickCross(this, att, taker));
         const target = this.choose(att, 'aerial', 'aerialAtt', taker);
         const defender = this.choose(def, 'defendAerial', 'aerialDef');
         const p = logistic(-0.4 + (this.skill(taker, 'cross') + this.skill(target, 'aerialAtt') - 60 - this.skill(defender, 'aerialDef')) / 10);
         if (this.rng.chance(p)) this.shoot(att, def, target, taker, 0.05 + this.rng() * 0.12, 'header');
         else {
           defender.st.clearances++;
-          this.emit('defence', def.idx, C().headedClear(this, defender, taker));
+          this.emit('defence', def.idx, this.C.headedClear(this, defender, taker));
         }
       }
     }
@@ -543,7 +642,7 @@
     penalty(att, def) {
       const taker = this.bestAt(att, (r) => this.skill(r, 'penalty'));
       const gk = this.keeper(def);
-      this.emit('penalty', att.idx, C().penaltyAwarded(this, att, taker));
+      this.emit('penalty', att.idx, this.C.penaltyAwarded(this, att, taker));
       att.stats.shots++;
       att.stats.xg += 0.76;
       att.stats.bigChances++;
@@ -561,10 +660,10 @@
         gk.st.saves++;
         gk.st.penSaved++;
         def.stats.saves++;
-        this.emit('save', def.idx, C().penaltySaved(this, taker, gk), { big: true });
+        this.emit('save', def.idx, this.C.penaltySaved(this, taker, gk), { big: true });
       } else {
         taker.st.missedBig++;
-        this.emit('miss', att.idx, C().penaltyMissed(this, taker), { big: true });
+        this.emit('miss', att.idx, this.C.penaltyMissed(this, taker), { big: true });
       }
     }
 
@@ -587,7 +686,7 @@
         const pBlock = clamp(0.2 + (this.skill(blocker, 'block') - S) / 150 + (kind === 'long' ? 0.1 : 0), 0.08, 0.4);
         if (this.rng.chance(pBlock)) {
           blocker.st.blocks++;
-          this.emit('block', def.idx, C().blocked(this, shooter, blocker, kind));
+          this.emit('block', def.idx, this.C.blocked(this, shooter, blocker, kind));
           if (this.rng.chance(0.5)) this.corner(att, def);
           return;
         }
@@ -606,11 +705,11 @@
         gk.st.saves++;
         def.stats.saves++;
         const big = xg >= 0.25;
-        this.emit('save', def.idx, C().save(this, shooter, gk, kind, big), { big });
+        this.emit('save', def.idx, this.C.save(this, shooter, gk, kind, big), { big });
         if (this.rng.chance(0.45)) this.corner(att, def);
       } else {
         if (xg >= 0.3) shooter.st.missedBig++;
-        this.emit('miss', att.idx, C().miss(this, shooter, kind, xg >= 0.25), { big: xg >= 0.25 });
+        this.emit('miss', att.idx, this.C.miss(this, shooter, kind, xg >= 0.25), { big: xg >= 0.25 });
       }
     }
 
@@ -623,7 +722,7 @@
       }
       const g = { minute: this.minuteLabel(), side: att.idx, scorer: scorer.p.name, assister: assister && assister !== scorer ? assister.p.name : null, kind };
       this.goals.push(g);
-      this.emit('goal', att.idx, C().goal(this, att, scorer, assister !== scorer ? assister : null, kind), { goal: g });
+      this.emit('goal', att.idx, this.C.goal(this, att, scorer, assister !== scorer ? assister : null, kind), { goal: g });
     }
 
     // ---- Injuries & substitutions ---------------------------------------------
@@ -634,12 +733,13 @@
         const r = this.rng.weighted(list, (x) => (x.role === 'GK' ? 0.2 : 1) * (1.4 - x.energy / 100));
         if (!r) continue;
         r.injured = true;
-        this.emit('injury', s.idx, C().injury(this, r));
+        this.emit('injury', s.idx, this.C.injury(this, r));
         const repl = this.bestReplacement(s, r.role);
         if (repl && s.subsUsed < MAX_SUBS) this.doSub(s, r, repl, r.role, true);
         else {
           r.onPitch = false;
           r.minuteOff = this.minute;
+          this.lineupChanged();
           if (r.role === 'GK') this.replaceKeeper(s);
         }
       }
@@ -665,7 +765,7 @@
     }
 
     maybeSubs() {
-      if (this.half !== 2 || this.minute < 55) return;
+      if (this.half < 2 || this.minute < 55) return;
       for (const s of this.sides) {
         if (s.subsUsed >= MAX_SUBS || s.windowsUsed >= SUB_WINDOWS) continue;
         const tired = this.outfield(s).filter((r) => r.energy < 62).length;
@@ -716,7 +816,8 @@
       on.y = off.y;
       side.players.push(on);
       side.subsUsed++;
-      this.emit('sub', side.idx, C().sub(this, side, off, on), { on: on.p.name, off: off.p.name });
+      this.lineupChanged();
+      this.emit('sub', side.idx, this.C.sub(this, side, off, on), { on: on.p.name, off: off.p.name });
     }
 
     // ---- Ratings ------------------------------------------------------------------
@@ -751,8 +852,53 @@
 
     minutesPlayed(r) {
       if (r.minuteOn === null) return 0;
-      const endMin = r.minuteOff !== null ? r.minuteOff : Math.min(this.minute, 90);
-      return Math.max(0, Math.min(90, endMin) - r.minuteOn);
+      const cap = this.half > 2 ? 120 : 90;
+      const endMin = r.minuteOff !== null ? r.minuteOff : Math.min(this.minute, cap);
+      return Math.max(0, Math.min(cap, endMin) - r.minuteOn);
+    }
+
+    // Five kicks each (stopping once decided), then sudden death. Best penalty
+    // takers go first; the keeper faces every kick.
+    penaltyShootout() {
+      this.emit('halftime', null, this.C.shootoutStart(this));
+      const order = this.sides.map((s) =>
+        this.onPitch(s).slice().sort((x, y) => this.skill(y, 'penalty') - this.skill(x, 'penalty')));
+      const score = [0, 0];
+      const taken = [0, 0];
+      const kicks = [];
+      for (let round = 0; round < 30; round++) {
+        for (const side of [0, 1]) {
+          const takers = order[side];
+          const taker = takers[taken[side] % takers.length];
+          const gk = this.keeper(this.sides[1 - side]);
+          const pressure = round >= 4 ? 0.03 : 0;
+          const p = clamp(0.76 - pressure + (this.skill(taker, 'penalty') - this.skill(gk, 'gkPenalty')) / 150, 0.5, 0.92);
+          const scored = this.rng.chance(p);
+          taken[side]++;
+          if (scored) score[side]++;
+          kicks.push({ side, taker: taker.p.name, scored });
+          this.emit('shootout', side, this.C.shootoutKick(this, taker, gk, scored, score), { big: true });
+          if (round < 5) {
+            // Stop early once one side can't catch up.
+            const left = [5 - taken[0], 5 - taken[1]];
+            if (score[0] > score[1] + left[1] || score[1] > score[0] + left[0]) break;
+          }
+        }
+        if (round < 5) {
+          const left = [5 - taken[0], 5 - taken[1]];
+          if (score[0] > score[1] + left[1] || score[1] > score[0] + left[0]) break;
+        } else if (score[0] !== score[1]) {
+          break;
+        }
+      }
+      this.shootout = { score, kicks, winner: score[0] > score[1] ? 0 : 1 };
+    }
+
+    // Index of the winning side, or null for a draw.
+    winner() {
+      const [h, a] = this.sides;
+      if (h.score !== a.score) return h.score > a.score ? 0 : 1;
+      return this.shootout ? this.shootout.winner : null;
     }
 
     finish() {
@@ -761,7 +907,7 @@
       const total = h.stats.possession + a.stats.possession || 1;
       h.stats.possessionPct = Math.round((h.stats.possession / total) * 100);
       a.stats.possessionPct = 100 - h.stats.possessionPct;
-      this.emit('fulltime', null, C().fulltime(this));
+      this.emit('fulltime', null, this.C.fulltime(this));
     }
 
     possessionPct() {
