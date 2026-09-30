@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenFootball Match Simulator</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <h1>OpenFootball</h1>
+        <p class="tagline">FC 27 player database · text match simulator</p>
+      </div>
+    </div>
+    <div id="db-status" class="db-status">Loading players…</div>
+  </header>
+
+  <main>
+    <!-- Shown if players.csv can't be fetched (e.g. opened via file://). -->
+    <section id="loader" class="card loader hidden">
+      <h2>Load the player database</h2>
+      <p>The app couldn't fetch <code>players.csv</code> automatically. Serve the folder over HTTP
+        (for example <code>python3 -m http.server</code>) or pick the file below.</p>
+      <label class="btn primary file-btn">Choose players.csv<input id="csv-file" type="file" accept=".csv,text/csv"></label>
+    </section>
+
+    <section id="setup" class="hidden">
+      <div class="teams">
+        <div class="team-panel card" data-side="0"></div>
+        <div class="team-panel card" data-side="1"></div>
+      </div>
+      <div class="card kickoff-bar">
+        <div class="field">
+          <label for="speed">Match speed</label>
+          <select id="speed">
+            <option value="1100">Slow</option>
+            <option value="420" selected>Normal</option>
+            <option value="110">Fast</option>
+            <option value="0">Instant result</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="seed">Seed <span class="muted">(optional, replays a match)</span></label>
+          <input id="seed" type="text" inputmode="numeric" placeholder="random">
+        </div>
+        <label class="check"><input id="home-adv" type="checkbox" checked> Home advantage</label>
+        <button id="kickoff" class="btn primary big">Kick off</button>
+      </div>
+      <p class="hint">Starting XI and bench are picked automatically from each squad's position ratings.
+        Click a player, then another player (on the pitch or in the squad list) to swap them.</p>
+    </section>
+
+    <section id="match" class="hidden">
+      <div class="scoreboard card">
+        <div class="sb-team home">
+          <div class="sb-name" id="sb-home"></div>
+          <div class="sb-meta" id="sb-home-meta"></div>
+          <ul class="sb-scorers" id="sb-home-scorers"></ul>
+        </div>
+        <div class="sb-centre">
+          <div class="sb-score"><span id="sb-hs">0</span><span class="sep">–</span><span id="sb-as">0</span></div>
+          <div class="sb-clock" id="sb-clock">0'</div>
+          <div class="progress"><div id="sb-progress"></div></div>
+        </div>
+        <div class="sb-team away">
+          <div class="sb-name" id="sb-away"></div>
+          <div class="sb-meta" id="sb-away-meta"></div>
+          <ul class="sb-scorers" id="sb-away-scorers"></ul>
+        </div>
+      </div>
+
+      <div class="match-controls">
+        <button id="pause" class="btn">Pause</button>
+        <select id="live-speed" aria-label="Match speed">
+          <option value="1100">Slow</option>
+          <option value="420">Normal</option>
+          <option value="110">Fast</option>
+        </select>
+        <button id="skip" class="btn">Skip to full time</button>
+        <span class="spacer"></span>
+        <button id="rematch" class="btn hidden">Rematch</button>
+        <button id="back" class="btn">Change teams</button>
+      </div>
+
+      <div id="final" class="card final hidden"></div>
+
+      <div class="match-grid">
+        <div class="card feed-card">
+          <div class="card-head">
+            <h2>Commentary</h2>
+            <label class="check small"><input id="key-only" type="checkbox"> Key moments only</label>
+          </div>
+          <ol id="feed" class="feed"></ol>
+        </div>
+        <div class="side-col">
+          <div class="card">
+            <h2>Match stats</h2>
+            <div id="stats" class="stats"></div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <h2>Player ratings</h2>
+              <div class="tabs" id="rating-tabs">
+                <button data-side="0" class="tab active"></button>
+                <button data-side="1" class="tab"></button>
+              </div>
+            </div>
+            <div id="live-ratings"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="report" class="card hidden"></div>
+    </section>
+  </main>
+
+  <script src="js/util.js"></script>
+  <script src="js/csv.js"></script>
+  <script src="js/players.js"></script>
+  <script src="js/formations.js"></script>
+  <script src="js/commentary.js"></script>
+  <script src="js/engine.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
