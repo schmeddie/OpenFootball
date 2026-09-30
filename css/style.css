@@ -500,3 +500,23 @@ input[type="number"] {
   .h2h-pair .btn { justify-self: center; }
   .score-list { grid-template-columns: 1fr 1fr; }
 }
+
+/* ---- Rest of season ---------------------------------------------------------- */
+.opt-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.file-rows { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.file-row { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--card-2); border-radius: 10px; flex-wrap: wrap; }
+.file-info { display: flex; flex-direction: column; gap: 2px; flex: 1 1 220px; min-width: 0; }
+.file-info .small-text { overflow-wrap: anywhere; }
+.current-table { margin-top: 8px; }
+.current-table summary { cursor: pointer; font-weight: 600; font-size: 13px; padding: 4px 0; }
+.form-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.form-chips .team-chip { padding: 4px 10px; }
+.form-chips b.up { color: var(--q-high); }
+.form-chips b.down { color: var(--q-poor); }
+.fx-table td { vertical-align: middle; }
+.fx-table td.r, .fx-table th.r { text-align: right; }
+.fx-odds { min-width: 150px; }
+.wdl-bar.mini { height: 8px; }
+.fx-nums { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 2px; }
+.fx-week td { text-align: left; font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); padding-top: 14px; }
+.card-head select { width: auto; }

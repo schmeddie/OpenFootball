@@ -8,14 +8,15 @@ resolved from the players' attributes.
 
 ## Running it
 
-The app is plain HTML/CSS/JS with no build step. Serve the folder over HTTP so the browser can load `players.csv`:
+The app is plain HTML/CSS/JS with no build step. It needs to be served over HTTP, so that the browser lets it load
+`players.csv` and run simulations on all CPU cores:
 
-```sh
-python3 -m http.server 8000
-# open http://localhost:8000
-```
+- **Windows:** double-click `start.bat`. It starts a small local web server using PowerShell, which comes with
+  Windows, so nothing needs installing, and opens the app in your browser. Keep the window open while you use it.
+- **Mac/Linux:** run `./start.sh` (needs Python 3), or `python3 -m http.server 8000` and open http://localhost:8000.
 
-If you open `index.html` directly from disk, the app asks you to choose `players.csv` manually.
+If you open `index.html` directly from disk instead, the app asks you to choose `players.csv` manually and the
+Supercomputer runs on a single core.
 
 ## Features
 
@@ -61,6 +62,51 @@ How it works:
 
 Workers need the page to be served over HTTP. Opened from `file://`, the simulations run on the main thread instead.
 This is slower, but it works.
+
+## Rest of season
+
+The Supercomputer's **Rest of season** mode takes a football-data.co.uk results file for the current season (for
+example the Premier League's `E0.csv`). It can also take a fixtures file, which may be football-data's `fixtures.csv`
+covering every league; only the matching division is used. It:
+
+- starts from the real table, keeping the points already won,
+- simulates only the games still to play, using the squads' FC 27 players,
+- reports predicted final points with a likely range, title / top-N / relegation odds and a finishing-position grid,
+- gives home/draw/away odds, the likeliest score and average goals for every remaining game, filterable by team.
+
+Without a fixtures file, the remaining games are worked out from which home/away pairings haven't been played yet.
+The files you load are remembered in the browser.
+
+A **form adjustment** (on by default) nudges each team's strength up or down by how much it has out- or under-played
+its ratings so far. It's measured from **shots and shots on target, for and against**, compared with what the engine
+expected from the same games, then shrunk towards zero while few games have been played. Shots are used rather than
+points because points are dominated by luck over a handful of games.
+
+Retro-tested on 2025-26 by predicting from a point in the season and scoring against what actually happened
+(per-game RPS, lower is better):
+
+| Predicting from | Ratings only | + form from points | **+ form from shots (default)** | Bookmakers (closing odds) |
+|---|---|---|---|---|
+| Matchday 5 | 0.2113 | 0.2187 | **0.2078** | 0.2067 |
+| Matchday 10 | 0.2126 | 0.2181 | **0.2082** | 0.2040 |
+| Halfway | 0.2241 | 0.2269 | **0.2101** | 0.2089 |
+
+Average error in each team's final points: from matchday 5, 7.7 → 7.4 (bookmakers 6.3); from halfway, 5.4 → 4.2
+(bookmakers 4.0). Shot-based form closes half to nine-tenths of the gap to the betting market, while points-based form
+makes predictions worse every time.
+
+Caveats:
+- **One season, about ten settings tried.** The chosen setting may be slightly flattered by the choice. The simplest
+  consistent option (equal weight on shots and shots on target, weight 1) was picked rather than the best-scoring one
+  at any single checkpoint.
+- **Partly tuned on the same data.** The engine was tuned on the first half of 2025-26, so the matchday-5 and
+  matchday-10 tests reuse some of those games. The halfway test does not.
+
+```sh
+node scripts/rest-of-season.js --results E0.csv [--fixtures fixtures.csv] --form shotmix:1   # predict from real results
+node scripts/rest-of-season.js --results E0.csv --upto 50 --form none,points:1,shotmix:1 # retro-test a finished season
+node scripts/rest-of-season.js --results E0.csv --sensitivity                              # re-measure form signal scales
+```
 
 ## Accuracy (backtest)
 

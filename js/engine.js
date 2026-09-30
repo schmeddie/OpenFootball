@@ -70,7 +70,9 @@
     // fast: skip commentary and the event log (results and stats are unaffected
     // in distribution, though a seed won't replay the same match in both modes).
     // knockout: a draw goes to extra time and then penalties.
-    constructor({ home, away, seed, homeAdvantage = true, fast = false, knockout = false }) {
+    // strengths: optional [home, away] multipliers on each team's ability,
+    // e.g. from how they've performed against their ratings this season.
+    constructor({ home, away, seed, homeAdvantage = true, fast = false, knockout = false, strengths = null }) {
       this.seed = seed >>> 0;
       this.fast = fast;
       this.knockout = knockout;
@@ -87,7 +89,7 @@
       // (tactics, confidence, niggles, luck), as a multiplier on ability.
       for (const side of this.sides) {
         const g = Math.sqrt(-2 * Math.log(1 - this.rng())) * Math.cos(2 * Math.PI * this.rng());
-        side.form = clamp(1 + g * T.formSd, 0.85, 1.15);
+        side.form = clamp(1 + g * T.formSd, 0.85, 1.15) * (strengths ? strengths[side.idx] || 1 : 1);
       }
       this.shootout = null;
       this.finished = false;
