@@ -39,6 +39,8 @@ const NAME_MAP = {
   'West Ham': 'West Ham|EFL Championship',
   Wolves: 'Wolves|EFL Championship',
   Ipswich: 'Ipswich|Premier League',
+  Coventry: 'Coventry City|Premier League',
+  Hull: 'Hull City|Premier League',
   Leicester: 'Leicester City|EFL Championship',
   Southampton: 'Southampton|EFL Championship',
 };
@@ -211,6 +213,29 @@ function report(fixtures, sim, secs) {
   for (const [name, pf] of Object.entries(models)) {
     const s = (scores[name] = score(pf));
     console.log(`${name.padEnd(30)} ${s.rps.toFixed(4)}   ${s.brier.toFixed(4)}   ${s.logLoss.toFixed(4)}    ${pct(s.accuracy)}`);
+  }
+
+  // Is the engine-vs-bookies gap real or luck? Paired bootstrap over fixtures.
+  const rpsOf = (p, f) => {
+    const o = outcome(f);
+    const y = [0, 1, 2].map((k) => (k === o ? 1 : 0));
+    return 0.5 * ((p[0] - y[0]) ** 2 + (p[0] + p[1] - y[0] - y[1]) ** 2);
+  };
+  const paired = fixtures.filter((f) => f.book).map((f) => rpsOf(engineP(f), f) - rpsOf(f.book, f));
+  if (paired.length) {
+    const rng = OF.util.makeRng(1);
+    const means = [];
+    for (let b = 0; b < 4000; b++) {
+      let sum = 0;
+      for (let i = 0; i < paired.length; i++) sum += paired[Math.floor(rng() * paired.length)];
+      means.push(sum / paired.length);
+    }
+    means.sort((x, y) => x - y);
+    const diff = paired.reduce((a, b) => a + b, 0) / paired.length;
+    const lo = means[Math.floor(0.025 * means.length)];
+    const hi = means[Math.floor(0.975 * means.length)];
+    const verdict = hi < 0 ? 'engine better' : lo > 0 ? 'bookies better' : 'not distinguishable at this sample size';
+    console.log(`\nEngine minus bookies RPS: ${diff >= 0 ? '+' : ''}${diff.toFixed(4)}  (95% CI ${lo.toFixed(4)} to ${hi.toFixed(4)}: ${verdict})`);
   }
 
   // Outcome mix and goals.
