@@ -62,6 +62,43 @@ How it works:
 Workers need the page to be served over HTTP. Opened from `file://`, the simulations run on the main thread instead.
 This is slower, but it works.
 
+## Rest of season
+
+The Supercomputer's **Rest of season** mode takes a football-data.co.uk results file for the current season (for
+example the Premier League's `E0.csv`). It can also take a fixtures file, which may be football-data's `fixtures.csv`
+covering every league; only the matching division is used. It:
+
+- starts from the real table, keeping the points already won,
+- simulates only the games still to play, using the squads' FC 27 players,
+- reports predicted final points with a likely range, title / top-N / relegation odds and a finishing-position grid,
+- gives home/draw/away odds, the likeliest score and average goals for every remaining game, filterable by team.
+
+Without a fixtures file, the remaining games are worked out from which home/away pairings haven't been played yet.
+The files you load are remembered in the browser.
+
+An optional **form adjustment** nudges each team up or down by how much its real points so far beat or missed what
+its ratings expected. It's off by default because it didn't help in testing: retro-testing on 2025-26 (predicting
+from a point in the season, then scoring against what actually happened):
+
+| Predicting from | Model | Per-game RPS ↓ | Final points error ↓ | Table rank corr ↑ |
+|---|---|---|---|---|
+| Matchday 5 | Engine (ratings only) | 0.2108 | 7.6 pts | 0.69 |
+| | Engine + form adjustment (k=0.1) | 0.2188 | 8.4 pts | 0.62 |
+| | Bookmakers (closing odds) | 0.2067 | 6.3 pts | 0.75 |
+| | Current points per game × 38 | – | 17.6 pts | 0.42 |
+| Halfway | Engine (ratings only) | 0.2234 | 5.3 pts | 0.79 |
+| | Engine + form adjustment (k=0.05) | 0.2218 | 5.6 pts | 0.83 |
+| | Bookmakers (closing odds) | 0.2089 | 4.0 pts | 0.85 |
+| | Current points per game × 38 | – | 6.9 pts | 0.82 |
+
+Bookmaker odds exist match by match, so the bookmaker "final points" here are real points so far plus expected
+points from each remaining game's closing odds.
+
+```sh
+node scripts/rest-of-season.js --results E0.csv [--fixtures fixtures.csv] --runs 1000   # predict from real results
+node scripts/rest-of-season.js --results E0.csv --upto 50 --update 0,0.1                 # retro-test a finished season
+```
+
 ## Accuracy (backtest)
 
 `scripts/backtest.js` replays every fixture of a real season (`E0.csv` is the 2025-26 Premier League, from

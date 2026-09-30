@@ -7,6 +7,12 @@
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmtInt = (n) => Math.round(n).toLocaleString();
   const MS_PER_MATCH = 1.9; // rough single-core cost, refined from the last run
+  // Form adjustment for rest-of-season mode. Backtested on 2025-26: it made
+  // predictions worse after 5 matchdays and was roughly neutral at halfway,
+  // so it's off by default and kept small.
+  const FORM_K = 0.05;
+  const FORM_RUNS = 200;
+  const FIXTURE_PAGE = 40;
 
   const sc = {
     db: null,
@@ -17,7 +23,11 @@
       h2h: { homeAdvantage: true, knockout: false },
       league: { format: 'double', topPlaces: 4, relegation: 3, homeAdvantage: true },
       cup: { draw: 'random' },
+      rest: { topPlaces: 4, relegation: 3, homeAdvantage: true, form: false },
     },
+    // Rest-of-season inputs (CSV text is remembered in this browser).
+    rest: { results: null, fixtures: null, state: null, team: '', showAll: false },
+    lastRun: null,
     autoCfg: new Map(),
     run: null, // active run state
     msPerMatch: MS_PER_MATCH,
@@ -30,9 +40,43 @@
     const pl = sc.db.teams.filter((t) => t.league === 'Premier League');
     sc.lists.league = pl.length ? pl : sc.db.teams.filter((t) => t.league === sc.db.teams[0].league);
     sc.lists.cup = sc.db.teams.filter((t) => t.gender === "Men's Football").slice(0, 16);
+    for (const kind of ['results', 'fixtures']) {
+      try {
+        const saved = JSON.parse(localStorage.getItem(`of-rest-${kind}`) || 'null');
+        if (saved) sc.rest[kind] = saved;
+      } catch (err) { /* storage unavailable */ }
+    }
+    rebuildSeason();
     bind();
     renderConfig();
   });
+
+  // ---- Rest-of-season data ------------------------------------------------------
+  function rebuildSeason() {
+    const r = sc.rest;
+    r.state = null;
+    r.error = '';
+    if (!r.results) return;
+    try {
+      const results = OF.parseCSV(r.results.text).filter((x) => x.HomeTeam);
+      const fixtures = r.fixtures ? OF.parseCSV(r.fixtures.text).filter((x) => x.HomeTeam) : null;
+      const st = OF.season.buildSeason(sc.db, results, fixtures);
+      if (!st.played.length) r.error = 'No played matches found. Is this a football-data.co.uk style CSV with FTHG/FTAG columns?';
+      else r.state = st;
+    } catch (err) {
+      r.error = `Couldn't read that file: ${err.message}`;
+    }
+  }
+
+  async function loadRestFile(kind, file) {
+    const text = await file.text();
+    sc.rest[kind] = { name: file.name, text };
+    try {
+      localStorage.setItem(`of-rest-${kind}`, JSON.stringify(sc.rest[kind]));
+    } catch (err) { /* too big or storage blocked: fine, it just won't be remembered */ }
+    rebuildSeason();
+    renderConfig();
+  }
   document.addEventListener('of:super-shown', () => renderConfig());
 
   // ---- Team configs ------------------------------------------------------------
@@ -83,6 +127,10 @@
     const teamsCard = $('#sc-teams');
     teamsCard.addEventListener('change', (e) => {
       const act = e.target.dataset.act;
+      if ((act === 'rest-results' || act === 'rest-fixtures') && e.target.files[0]) {
+        loadRestFile(act === 'rest-results' ? 'results' : 'fixtures', e.target.files[0]);
+        return;
+      }
       if (act === 'b-league') sc.builder.league = e.target.value;
       else if (act === 'b-gender') sc.builder.gender = e.target.value;
       else return;
@@ -105,6 +153,13 @@
         sc.lists[sc.mode] = [];
       } else if (act === 'remove') {
         sc.lists[sc.mode] = list.filter((t) => t.key !== b.dataset.key);
+      } else if (act === 'rest-clear') {
+        const kind = b.dataset.kind;
+        sc.rest[kind] = null;
+        try {
+          localStorage.removeItem(`of-rest-${kind}`);
+        } catch (err) { /* ignore */ }
+        rebuildSeason();
       } else if (act === 'swap') {
         OF.app.swapSides();
       } else if (act === 'edit') {
@@ -114,6 +169,18 @@
         return;
       }
       renderConfig();
+    });
+    // Fixture list controls in rest-of-season results.
+    $('#sc-results').addEventListener('change', (e) => {
+      if (e.target.dataset.act !== 'fx-team') return;
+      sc.rest.team = e.target.value;
+      if (sc.lastRun) renderResults(sc.lastRun, !sc.run);
+    });
+    $('#sc-results').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-act="fx-all"]');
+      if (!b) return;
+      sc.rest.showAll = !sc.rest.showAll;
+      if (sc.lastRun) renderResults(sc.lastRun, !sc.run);
     });
     $('#sc-options').addEventListener('change', (e) => {
       const k = e.target.dataset.opt;
@@ -145,6 +212,8 @@
         <div class="h2h-pair">${side(h, 'Home')}<button class="btn small ghost" data-act="swap" title="Swap home and away">⇄</button>${side(a, 'Away')}</div>
         <p class="muted small-text">This uses the teams, formations and lineups from the Match tab, including any swaps you made.</p>
         <button class="btn small" data-act="edit">Change teams on the Match tab</button>`;
+    } else if (sc.mode === 'rest') {
+      card.innerHTML = renderRestConfig();
     } else {
       const list = sc.lists[sc.mode];
       const bTeams = builderTeams();
@@ -197,6 +266,16 @@
       html = `
         <label class="check"><input type="checkbox" data-opt="homeAdvantage" ${o.homeAdvantage ? 'checked' : ''}> Home advantage</label>
         <label class="check"><input type="checkbox" data-opt="knockout" ${o.knockout ? 'checked' : ''}> Knockout tie (extra time + penalties)</label>`;
+    } else if (sc.mode === 'rest') {
+      html = `
+        <div class="opt-grid two">
+          <div class="field"><label>Top places</label><input type="number" min="0" max="20" data-opt="topPlaces" value="${o.topPlaces}"></div>
+          <div class="field"><label>Relegation places</label><input type="number" min="0" max="20" data-opt="relegation" value="${o.relegation}"></div>
+        </div>
+        <label class="check"><input type="checkbox" data-opt="homeAdvantage" ${o.homeAdvantage ? 'checked' : ''}> Home advantage</label>
+        <label class="check"><input type="checkbox" data-opt="form" ${o.form ? 'checked' : ''}> Adjust teams for form so far</label>
+        <p class="muted small-text">Form adjustment nudges teams up or down by how far their real results beat or missed what their ratings
+          expected. In tests on 2025-26 it made predictions worse after 5 matchdays and was roughly neutral at halfway, so it's off by default.</p>`;
     } else if (sc.mode === 'league') {
       html = `
         <div class="opt-grid">
@@ -224,18 +303,26 @@
   }
 
   function jobTeamsCount() {
+    if (sc.mode === 'rest') return sc.rest.state ? sc.rest.state.teams.length : 0;
     return sc.mode === 'h2h' ? 2 : sc.lists[sc.mode].length;
   }
 
   function updateEstimate() {
     if (!sc.db) return;
     const n = jobTeamsCount();
-    const fake = { mode: sc.mode, teams: new Array(n), options: sc.options[sc.mode] };
+    const st = sc.rest.state;
+    const rest = sc.mode === 'rest';
+    const fake = rest
+      ? { mode: 'league', view: 'rest', teams: new Array(n), options: {}, fixtures: st ? st.remaining : [] }
+      : { mode: sc.mode, teams: new Array(n), options: sc.options[sc.mode] };
     const runs = currentRuns();
-    const matches = runs * OF.sim.matchesPerRun(fake);
+    let matches = runs * OF.sim.matchesPerRun(fake);
+    if (rest && st && sc.options.rest.form) matches += FORM_RUNS * st.played.length;
     const secs = (matches * sc.msPerMatch) / 1000 / cores();
-    const unit = sc.mode === 'h2h' ? 'matches' : sc.mode === 'league' ? 'seasons' : 'tournaments';
-    const problem = sc.mode !== 'h2h' && n < 2 ? 'Add at least two teams.' : '';
+    const unit = unitFor(fake);
+    let problem = sc.mode !== 'h2h' && n < 2 ? 'Add at least two teams.' : '';
+    if (rest && !st) problem = 'Load a results file first.';
+    else if (rest && !st.remaining.length) problem = 'No fixtures left to play.';
     $('#sc-estimate').innerHTML = problem
       ? `<span class="warn">${problem}</span>`
       : `${fmtInt(runs)} ${unit} = <b>${fmtInt(matches)}</b> matches · about ${fmtDuration(secs)} on ${cores()} worker${cores() > 1 ? 's' : ''}`;
@@ -261,6 +348,16 @@
         return null;
       }
       teams = [packCfg(h.team, h.formation, h.xi, h.subs.slice(0, 7)), packCfg(a.team, a.formation, a.xi, a.subs.slice(0, 7))];
+    } else if (sc.mode === 'rest') {
+      const st = sc.rest.state;
+      if (!st || st.teams.length < 2) return null;
+      const o = sc.options.rest;
+      // A league job that starts from the real table and plays only what's left.
+      return {
+        mode: 'league', view: 'rest', teams: st.teams.map(teamConfig), seed,
+        options: { format: 'double', topPlaces: o.topPlaces, relegation: o.relegation, homeAdvantage: o.homeAdvantage },
+        start: st.table, fixtures: st.remaining.map((f) => [f.i, f.j]),
+      };
     } else {
       teams = sc.lists[sc.mode].map(teamConfig);
       if (teams.length < 2) return null;
@@ -268,96 +365,132 @@
     return { mode: sc.mode, teams, options: { ...sc.options[sc.mode] }, seed };
   }
 
-  function startRun() {
+  async function startRun() {
     if (sc.run) return;
     const job = buildJob();
     if (!job) return;
-    const total = currentRuns();
-    const perRun = OF.sim.matchesPerRun(job);
-    // Batches of roughly 300 matches keep workers busy and progress smooth.
-    const batch = Math.max(1, Math.min(Math.ceil(total / cores()), Math.round(300 / perRun)));
-    const run = (sc.run = {
-      job, total, perRun, batch,
-      next: 0, done: 0,
-      agg: OF.sim.createAgg(),
+    const run = (sc.run = sc.lastRun = {
+      job, total: currentRuns(), perRun: OF.sim.matchesPerRun(job),
+      done: 0, agg: OF.sim.createAgg(),
       started: performance.now(),
-      workers: [],
-      renderTimer: null,
-      mainThread: false,
+      workers: 0, mainThread: false, stop: null, renderTimer: null, phase: '',
+      season: job.view === 'rest' ? sc.rest.state : null,
     });
     $('#sc-go').classList.add('hidden');
     $('#sc-cancel').classList.remove('hidden');
     $('#sc-progress').classList.remove('hidden');
     setLocked(true);
     $('#sc-results').innerHTML = '';
-
-    const nWorkers = Math.min(cores(), Math.ceil(total / batch));
-    try {
-      for (let i = 0; i < nWorkers; i++) {
-        const w = new Worker('js/sim-worker.js');
-        w.onmessage = (e) => onBatch(run, w, e.data);
-        w.onerror = (e) => {
-          e.preventDefault();
-          // Workers are blocked on file:// pages: fall back to the main thread.
-          if (run.done === 0 && !run.mainThread) {
-            stopWorkers(run);
-            runOnMainThread(run);
-          } else {
-            fail(run, e.message || 'Worker error');
-          }
-        };
-        w.postMessage({ type: 'job', job });
-        run.workers.push(w);
-      }
-      for (const w of run.workers) dispatch(run, w);
-    } catch (err) {
-      stopWorkers(run);
-      runOnMainThread(run);
-    }
     tickProgress();
-  }
-
-  function dispatch(run, w) {
-    if (run.next >= run.total) return false;
-    const start = run.next;
-    const end = Math.min(run.total, start + run.batch);
-    run.next = end;
-    w.postMessage({ type: 'batch', start, end });
-    return true;
-  }
-
-  function onBatch(run, w, msg) {
-    if (sc.run !== run) return;
-    OF.sim.mergeAgg(run.agg, msg.agg);
-    run.done += msg.end - msg.start;
-    if (run.done >= run.total) finishRun(run);
-    else {
-      dispatch(run, w);
-      scheduleRender(run);
+    try {
+      if (job.view === 'rest' && sc.options.rest.form && run.season.played.length) {
+        // Phase 1: what the ratings expected from the games already played.
+        run.phase = `Measuring form: replaying the ${run.season.played.length} games already played`;
+        const pjob = { mode: 'league', teams: job.teams, options: job.options, seed: job.seed, fixtures: run.season.played.map((g) => [g.i, g.j]) };
+        const p = await runPool(run, pjob, FORM_RUNS, null);
+        if (sc.run !== run) return;
+        run.strengths = OF.season.strengthsFromResults(job.teams.length, run.season.played, p.fxOut, p.runs, FORM_K);
+        job.strengths = run.strengths.map((x) => x.strength);
+        run.phase = '';
+        run.started = performance.now();
+      }
+      const agg = await runPool(run, job, run.total, (partial, done) => {
+        run.agg = partial;
+        run.done = done;
+        scheduleRender(run);
+      });
+      if (sc.run !== run) return;
+      run.agg = agg;
+      run.done = run.total;
+      finishRun(run);
+    } catch (err) {
+      if (sc.run === run) fail(run, err.message || String(err));
     }
   }
 
-  function runOnMainThread(run) {
-    run.mainThread = true;
-    run.next = 0;
-    run.done = 0;
-    run.agg = OF.sim.createAgg();
-    const step = () => {
-      if (sc.run !== run) return;
-      const t0 = performance.now();
-      const agg = OF.sim.createAgg();
-      const start = run.next;
-      // Work in ~40ms slices so the page stays responsive.
-      while (run.next < run.total && performance.now() - t0 < 40) OF.sim.simulateRun(run.job, run.next++, agg);
-      onBatch(run, null, { agg, start, end: run.next });
-      if (run.done < run.total) setTimeout(step, 0);
-    };
-    setTimeout(step, 0);
-  }
-
-  function stopWorkers(run) {
-    for (const w of run.workers) w.terminate();
-    run.workers = [];
+  // Run `total` runs of `job` across Web Workers (falling back to the main
+  // thread on file:// pages) and resolve with the merged aggregate.
+  function runPool(run, job, total, onProgress) {
+    return new Promise((resolve, reject) => {
+      const perRun = OF.sim.matchesPerRun(job);
+      // Batches of roughly 300 matches keep workers busy and progress smooth.
+      const batch = Math.max(1, Math.min(Math.ceil(total / cores()), Math.round(300 / perRun)));
+      let agg = OF.sim.createAgg();
+      let next = 0;
+      let done = 0;
+      let workers = [];
+      let finished = false;
+      let fellBack = false;
+      const stop = () => {
+        finished = true;
+        workers.forEach((w) => w.terminate());
+        workers = [];
+      };
+      run.stop = stop;
+      const merge = (msg) => {
+        if (finished) return;
+        OF.sim.mergeAgg(agg, msg.agg);
+        done += msg.end - msg.start;
+        if (done >= total) {
+          stop();
+          resolve(agg);
+        } else if (onProgress) onProgress(agg, done);
+      };
+      const dispatch = (w) => {
+        if (next >= total) return;
+        const start = next;
+        next = Math.min(total, next + batch);
+        w.postMessage({ type: 'batch', start, end: next });
+      };
+      const onMainThread = () => {
+        if (fellBack) return;
+        fellBack = true;
+        workers.forEach((w) => w.terminate());
+        workers = [];
+        run.mainThread = true;
+        run.workers = 0;
+        agg = OF.sim.createAgg();
+        next = 0;
+        done = 0;
+        const step = () => {
+          if (finished) return;
+          const t0 = performance.now();
+          const part = OF.sim.createAgg();
+          const start = next;
+          // Work in ~40ms slices so the page stays responsive.
+          while (next < total && performance.now() - t0 < 40) OF.sim.simulateRun(job, next++, part);
+          merge({ agg: part, start, end: next });
+          if (!finished) setTimeout(step, 0);
+        };
+        setTimeout(step, 0);
+      };
+      if (run.mainThread) return onMainThread();
+      try {
+        const n = Math.min(cores(), Math.ceil(total / batch));
+        for (let i = 0; i < n; i++) {
+          const w = new Worker('js/sim-worker.js');
+          w.onmessage = (e) => {
+            merge(e.data);
+            if (!finished) dispatch(w);
+          };
+          w.onerror = (e) => {
+            e.preventDefault();
+            // Workers are blocked on file:// pages: fall back to the main thread.
+            if (done === 0) onMainThread();
+            else {
+              stop();
+              reject(new Error(e.message || 'Worker error'));
+            }
+          };
+          w.postMessage({ type: 'job', job });
+          workers.push(w);
+        }
+        run.workers = workers.length;
+        workers.forEach(dispatch);
+      } catch (err) {
+        onMainThread();
+      }
+    });
   }
 
   function scheduleRender(run) {
@@ -368,34 +501,42 @@
     }, 350);
   }
 
+  function unitFor(job) {
+    if (job.view === 'rest') return 'simulations';
+    return job.mode === 'h2h' ? 'matches' : job.mode === 'league' ? 'seasons' : 'tournaments';
+  }
+
   function tickProgress() {
     const run = sc.run;
     if (!run) return;
-    const elapsed = (performance.now() - run.started) / 1000;
-    const matches = run.agg.matches;
-    const rate = elapsed > 0 ? matches / elapsed : 0;
-    const left = rate > 0 ? ((run.total - run.done) * run.perRun) / rate : 0;
-    const unit = run.job.mode === 'h2h' ? 'matches' : run.job.mode === 'league' ? 'seasons' : 'tournaments';
-    $('#sc-bar').style.width = `${(run.done / run.total) * 100}%`;
-    $('#sc-progress-text').innerHTML = `
-      <b>${fmtInt(run.done)}</b> / ${fmtInt(run.total)} ${unit}
-      <span>${fmtInt(matches)} matches simulated</span>
-      <span>${fmtInt(rate)} matches/s</span>
-      <span>${run.mainThread ? 'main thread (open via a web server to use workers)' : `${run.workers.length} workers`}</span>
-      <span>${run.done ? `~${fmtDuration(left)} left` : 'starting…'}</span>`;
+    if (run.phase) {
+      $('#sc-bar').style.width = '0%';
+      $('#sc-progress-text').innerHTML = `<b>${esc(run.phase)}…</b>`;
+    } else {
+      const elapsed = (performance.now() - run.started) / 1000;
+      const matches = run.agg.matches;
+      const rate = elapsed > 0 ? matches / elapsed : 0;
+      const left = rate > 0 ? ((run.total - run.done) * run.perRun) / rate : 0;
+      $('#sc-bar').style.width = `${(run.done / run.total) * 100}%`;
+      $('#sc-progress-text').innerHTML = `
+        <b>${fmtInt(run.done)}</b> / ${fmtInt(run.total)} ${unitFor(run.job)}
+        <span>${fmtInt(matches)} matches simulated</span>
+        <span>${fmtInt(rate)} matches/s</span>
+        <span>${run.mainThread ? 'main thread (open via a web server to use workers)' : `${run.workers} workers`}</span>
+        <span>${run.done ? `~${fmtDuration(left)} left` : 'starting…'}</span>`;
+    }
     if (run.done < run.total) setTimeout(tickProgress, 250);
   }
 
   function finishRun(run) {
     const secs = (performance.now() - run.started) / 1000;
-    const cpuMs = (secs * 1000 * Math.max(1, run.workers.length)) / Math.max(1, run.agg.matches);
-    if (run.agg.matches > 200) sc.msPerMatch = run.mainThread ? secs * 1000 / run.agg.matches : cpuMs;
-    stopWorkers(run);
+    const cpuMs = (secs * 1000 * Math.max(1, run.workers)) / Math.max(1, run.agg.matches);
+    if (run.agg.matches > 200) sc.msPerMatch = run.mainThread ? (secs * 1000) / run.agg.matches : cpuMs;
     clearTimeout(run.renderTimer);
     sc.run = null;
     resetButtons();
     $('#sc-bar').style.width = '100%';
-    $('#sc-progress-text').innerHTML = `<b>Done.</b> <span>${fmtInt(run.total)} runs</span><span>${fmtInt(run.agg.matches)} matches</span><span>${fmtDuration(secs)}</span><span>seed ${run.job.seed}</span>`;
+    $('#sc-progress-text').innerHTML = `<b>Done.</b> <span>${fmtInt(run.total)} ${unitFor(run.job)}</span><span>${fmtInt(run.agg.matches)} matches</span><span>${fmtDuration(secs)}</span><span>seed ${run.job.seed}</span>`;
     renderResults(run, true);
     updateEstimate();
   }
@@ -403,7 +544,7 @@
   function stopRun(cancelled) {
     const run = sc.run;
     if (!run) return;
-    stopWorkers(run);
+    if (run.stop) run.stop();
     clearTimeout(run.renderTimer);
     sc.run = null;
     resetButtons();
@@ -417,6 +558,7 @@
 
   function fail(run, message) {
     stopRun(false);
+    $('#sc-progress').classList.remove('hidden');
     $('#sc-progress-text').innerHTML = `<span class="warn">Simulation failed: ${esc(message)}</span>`;
   }
 
@@ -443,7 +585,8 @@
     if (!agg.runs) return;
     const badge = final ? '' : `<span class="provisional">Provisional · ${Math.round((run.done / run.total) * 100)}% done</span>`;
     let html = '';
-    if (job.mode === 'h2h') html = renderH2H(agg, job);
+    if (job.view === 'rest') html = renderRest(run);
+    else if (job.mode === 'h2h') html = renderH2H(agg, job);
     else if (job.mode === 'league') html = renderLeague(agg, job);
     else html = renderCup(agg, job);
     $('#sc-results').innerHTML = `<div class="sc-results-head">${badge}</div>${html}`;
@@ -635,6 +778,167 @@
           </table></div>
         </div>
       </div>`;
+  }
+
+  // ---- Rest of season ---------------------------------------------------------------
+  function renderRestConfig() {
+    const r = sc.rest;
+    const st = r.state;
+    const fmtDate = (d) => (d ? d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }) : '');
+    const fileRow = (kind, label, detail) => `
+      <div class="file-row">
+        <div class="file-info"><b>${label}</b><span class="muted small-text">${detail}</span></div>
+        <label class="btn small file-btn">${r[kind] ? 'Replace' : 'Choose file'}<input type="file" accept=".csv,text/csv" data-act="rest-${kind}"></label>
+        ${r[kind] ? `<button class="btn small ghost" data-act="rest-clear" data-kind="${kind}">Remove</button>` : ''}
+      </div>`;
+    const dates = st ? st.played.map((g) => g.date).filter(Boolean).sort((a, b) => a - b) : [];
+    const resultsDetail = r.results
+      ? `${esc(r.results.name)}${st ? ` · ${st.played.length} games${dates.length ? `, ${fmtDate(dates[0])} – ${fmtDate(dates[dates.length - 1])}` : ''}` : ''}`
+      : 'football-data.co.uk CSV, e.g. E0.csv for the Premier League';
+    const fixturesDetail = r.fixtures
+      ? `${esc(r.fixtures.name)}${st ? ` · ${st.remaining.length} games still to play` : ''}`
+      : st ? `Optional. Without it, the ${st.remaining.length} remaining games are worked out from who hasn't played whom yet (no dates).` : 'Optional: adds dates and order to the remaining games.';
+    let tableHtml = '';
+    if (st) {
+      const rows = st.teams.map((t, i) => ({ t, ...st.table[i] }))
+        .sort((a, b) => b.pts - a.pts || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf);
+      tableHtml = `<details class="current-table"><summary>Current table (from the results file)</summary>
+        <div class="table-wrap"><table class="sc-table compact">
+          <thead><tr><th>#</th><th class="l">Team</th><th>P</th><th>W</th><th>D</th><th>L</th><th>GD</th><th>Pts</th></tr></thead>
+          <tbody>${rows.map((x, i) => `<tr><td>${i + 1}</td><td class="l">${esc(x.t.name)}</td><td>${x.p}</td><td>${x.w}</td><td>${x.d}</td><td>${x.l}</td><td>${x.gf - x.ga >= 0 ? '+' : ''}${x.gf - x.ga}</td><td><b>${x.pts}</b></td></tr>`).join('')}</tbody>
+        </table></div></details>`;
+    }
+    return `
+      <h2>Rest of the season</h2>
+      <p class="muted small-text">Banks the real results so far, then simulates only the games still to play, using each squad's FC 27 players.</p>
+      <div class="file-rows">
+        ${fileRow('results', 'Results so far', resultsDetail)}
+        ${fileRow('fixtures', 'Remaining fixtures', fixturesDetail)}
+      </div>
+      ${r.error ? `<p class="warn">${esc(r.error)}</p>` : ''}
+      ${st && st.unknown.length ? `<p class="warn">Couldn't match these teams to the player database: ${st.unknown.map(esc).join(', ')}</p>` : ''}
+      ${tableHtml}`;
+  }
+
+  function quantile(hist, total, q) {
+    let acc = 0;
+    for (let i = 0; i < hist.length; i++) {
+      acc += hist[i] || 0;
+      if (acc >= q * total) return i;
+    }
+    return hist.length - 1;
+  }
+
+  function renderRest(run) {
+    const { agg, job, season: st } = run;
+    const n = agg.runs;
+    const size = job.teams.length;
+    const top = job.options.topPlaces || 0;
+    const rel = job.options.relegation || 0;
+    const zone = (i) => (i === 0 ? 'z-title' : i < top ? 'z-top' : i >= size - rel ? 'z-rel' : '');
+    const rows = job.teams.map((cfg, i) => ({ i, cfg, now: st.table[i], t: agg.teams[cfg.team.key] }))
+      .filter((r) => r.t)
+      .sort((a, b) => b.t.pts - a.t.pts);
+    const posMax = Math.max(...rows.flatMap((r) => r.t.finish)) / n;
+    const mode = (t) => t.finish.indexOf(Math.max(...t.finish)) + 1;
+    const table = `
+      <div class="card">
+        <h2>Predicted final table <span class="muted">from ${fmtInt(n)} simulations of the last ${st.remaining.length} games</span></h2>
+        <p class="muted small-text">"Now" is the real table. Final points include the points already won. The likely range covers 80% of simulations.</p>
+        <div class="table-wrap"><table class="sc-table league-table">
+          <thead><tr><th>#</th><th class="l">Team</th><th>Now</th><th>Final pts</th><th>Likely range</th>
+            <th>Title</th>${top > 1 ? `<th>Top ${top}</th>` : ''}${rel ? '<th>Relegated</th>' : ''}
+            <th class="l">Finishing position (1 → ${size})</th></tr></thead>
+          <tbody>${rows.map((r, k) => {
+            const t = r.t;
+            return `<tr>
+              <td>${k + 1}</td>
+              <td class="l"><b>${esc(t.name)}</b> <span class="muted small-text">${t.rating}</span></td>
+              <td>${r.now.pts} <span class="muted small-text">(${r.now.p} pl)</span></td>
+              <td><b>${(t.pts / n).toFixed(1)}</b></td>
+              <td class="muted">${quantile(t.ptsHist || [], n, 0.1)}–${quantile(t.ptsHist || [], n, 0.9)}</td>
+              <td class="pcell" style="${heat(pct(t.title || 0, n))}">${fmtPct(pct(t.title || 0, n))}</td>
+              ${top > 1 ? `<td class="pcell" style="${heat(pct(t.top || 0, n))}">${fmtPct(pct(t.top || 0, n))}</td>` : ''}
+              ${rel ? `<td class="pcell" style="${heat(pct(t.releg || 0, n))}">${fmtPct(pct(t.releg || 0, n))}</td>` : ''}
+              <td class="l"><div class="pos-strip" style="--n:${size}">${t.finish.map((c, p) => `<i class="${zone(p)}" style="${heat(c / n, posMax)}" title="${esc(t.name)}: finishes ${ordinal(p + 1)} in ${fmtPct(c / n)} of simulations"></i>`).join('')}</div>
+                <span class="muted small-text">most often ${ordinal(mode(t))}</span></td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table></div>
+      </div>`;
+
+    let form = '';
+    if (run.strengths) {
+      const list = run.strengths.map((x, i) => ({ ...x, name: job.teams[i].team.name })).sort((a, b) => b.strength - a.strength);
+      form = `<div class="card">
+        <h2>Form adjustment</h2>
+        <p class="muted small-text">Real points so far against what the ratings expected from the same games, shrunk towards zero while the sample is small.</p>
+        <div class="form-chips">${list.map((x) => `<span class="team-chip">${esc(x.name)} <b class="${x.strength >= 1 ? 'up' : 'down'}">${x.strength >= 1 ? '+' : ''}${((x.strength - 1) * 100).toFixed(1)}%</b>
+          <span class="muted small-text">${x.real} pts vs ${x.expected.toFixed(1)} expected</span></span>`).join('')}</div>
+      </div>`;
+    }
+
+    // Fixture predictions.
+    const names = job.teams.map((c) => c.team.name);
+    const hasDates = st.remaining.some((f) => f.date);
+    const hasBook = st.remaining.some((f) => f.book);
+    const filter = sc.rest.team;
+    let list = st.remaining.map((f, k) => ({ f, k })).filter(({ f }) => filter === '' || names[f.i] === filter || names[f.j] === filter);
+    const total = list.length;
+    if (!sc.rest.showAll) list = list.slice(0, FIXTURE_PAGE);
+    const weekOf = (d) => {
+      const x = new Date(d);
+      x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7));
+      return x;
+    };
+    let lastWeek = '';
+    const bodyRows = list.map(({ f, k }) => {
+      const o = [0, 1, 2].map((q) => (agg.fxOut[k * 5 + q] || 0) / n);
+      const gh = (agg.fxOut[k * 5 + 3] || 0) / n;
+      const ga = (agg.fxOut[k * 5 + 4] || 0) / n;
+      const scores = agg.fxScores[k] ? Object.entries(agg.fxScores[k]).sort((a, b) => b[1] - a[1]) : [];
+      const likely = scores.length ? `${scores[0][0]} <span class="muted small-text">${fmtPct(scores[0][1] / n)}</span>` : '';
+      let head = '';
+      if (hasDates && f.date) {
+        const wk = weekOf(f.date).toISOString().slice(0, 10);
+        if (wk !== lastWeek) {
+          lastWeek = wk;
+          head = `<tr class="fx-week"><td colspan="${hasBook ? 7 : 6}">Week of ${weekOf(f.date).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })}</td></tr>`;
+        }
+      }
+      const b = f.book;
+      return `${head}<tr>
+        <td class="muted small-text">${f.date ? f.date.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }) : ''}${f.time ? ` ${esc(f.time)}` : ''}</td>
+        <td class="r"><b>${esc(names[f.i])}</b></td>
+        <td class="fx-odds">
+          <div class="wdl-bar mini" role="img" aria-label="Home ${fmtPct(o[0])}, draw ${fmtPct(o[1])}, away ${fmtPct(o[2])}">
+            <div class="side-0" style="flex:${o[0]}"></div><div class="draw" style="flex:${o[1]}"></div><div class="side-1" style="flex:${o[2]}"></div>
+          </div>
+          <div class="fx-nums"><span>${Math.round(o[0] * 100)}%</span><span>${Math.round(o[1] * 100)}%</span><span>${Math.round(o[2] * 100)}%</span></div>
+        </td>
+        <td class="l"><b>${esc(names[f.j])}</b></td>
+        <td>${likely}</td>
+        <td class="muted">${gh.toFixed(1)}–${ga.toFixed(1)}</td>
+        ${hasBook ? `<td class="muted small-text">${b ? `${Math.round(b[0] * 100)} / ${Math.round(b[1] * 100)} / ${Math.round(b[2] * 100)}` : ''}</td>` : ''}
+      </tr>`;
+    }).join('');
+    const fixtures = `
+      <div class="card">
+        <div class="card-head">
+          <h2>Match predictions <span class="muted">(${total} games)</span></h2>
+          <select data-act="fx-team" aria-label="Show one team's fixtures">
+            <option value="">All teams</option>
+            ${names.slice().sort().map((nm) => `<option ${nm === filter ? 'selected' : ''}>${esc(nm)}</option>`).join('')}
+          </select>
+        </div>
+        ${hasDates ? '' : '<p class="muted small-text">No fixtures file loaded, so the order of these games is unknown. Load one to get dates.</p>'}
+        <div class="table-wrap"><table class="sc-table fx-table">
+          <thead><tr><th class="l">Date</th><th class="r">Home</th><th>Home / Draw / Away</th><th class="l">Away</th><th>Likeliest score</th><th title="Average goals">Avg goals</th>${hasBook ? '<th title="Bookmaker odds in the fixtures file, margin removed">Bookies H/D/A</th>' : ''}</tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table></div>
+        ${total > FIXTURE_PAGE ? `<button class="btn small" data-act="fx-all">${sc.rest.showAll ? 'Show fewer' : `Show all ${total}`}</button>` : ''}
+      </div>`;
+    return table + form + fixtures;
   }
 
   function ordinal(k) {

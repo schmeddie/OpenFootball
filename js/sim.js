@@ -42,6 +42,7 @@
       fast: true,
       homeAdvantage: opts.homeAdvantage !== undefined ? opts.homeAdvantage : job.options.homeAdvantage !== false,
       knockout: !!opts.knockout,
+      strengths: opts.strengths || null,
     });
     m.runToEnd();
     return m;
@@ -116,12 +117,11 @@
   }
 
   // ---- League -----------------------------------------------------------------------
-  function runLeague(job, runIndex, agg, rng) {
-    const teams = job.teams;
-    const n = teams.length;
-    const double = job.options.format !== 'single';
-    const table = teams.map((t, i) => ({ i, pts: 0, gf: 0, ga: 0, w: 0, d: 0, l: 0 }));
-    const seasonGoals = {};
+  // A full season, or (with job.start + job.fixtures) the rest of a season:
+  // job.start holds each team's real record so far, job.fixtures the games
+  // still to play as [homeIndex, awayIndex], and job.strengths optional
+  // per-team ability multipliers.
+  function allFixtures(n, double) {
     const fixtures = [];
     for (let x = 0; x < n; x++) {
       for (let y = x + 1; y < n; y++) {
@@ -129,9 +129,35 @@
         else fixtures.push((x + y) % 2 ? [x, y] : [y, x]); // meet once, alternate home side
       }
     }
-    for (const [i, j] of fixtures) {
+    return fixtures;
+  }
+
+  function runLeague(job, runIndex, agg, rng) {
+    const teams = job.teams;
+    const n = teams.length;
+    const double = job.options.format !== 'single';
+    const table = teams.map((t, i) => {
+      const s = (job.start && job.start[i]) || {};
+      return { i, pts: s.pts || 0, gf: s.gf || 0, ga: s.ga || 0, w: s.w || 0, d: s.d || 0, l: s.l || 0 };
+    });
+    const seasonGoals = {};
+    const fixtures = job.fixtures || allFixtures(n, double);
+    const track = !!job.fixtures;
+    const fxOut = track ? agg.fxOut || (agg.fxOut = new Array(fixtures.length * 5).fill(0)) : null;
+    const fxScores = track ? agg.fxScores || (agg.fxScores = {}) : null;
+    const st = job.strengths;
+    for (let k = 0; k < fixtures.length; k++) {
+      const [i, j] = fixtures[k];
       {
-        const m = playMatch(job, teams[i], teams[j], rng.int(0, 2 ** 31));
+        const m = playMatch(job, teams[i], teams[j], rng.int(0, 2 ** 31), { strengths: st ? [st[i], st[j]] : null });
+        if (track) {
+          const [x, y] = [m.sides[0].score, m.sides[1].score];
+          fxOut[k * 5 + (x > y ? 0 : x === y ? 1 : 2)]++;
+          fxOut[k * 5 + 3] += x;
+          fxOut[k * 5 + 4] += y;
+          const sc = fxScores[k] || (fxScores[k] = {});
+          inc(sc, `${x}-${y}`);
+        }
         agg.matches++;
         const [h, a] = m.sides;
         const th = table[i];
@@ -155,6 +181,9 @@
       const t = teams[row.i].team;
       const e = tagg[t.key] || (tagg[t.key] = { name: t.name, league: t.league, rating: t.rating, finish: new Array(n).fill(0) });
       e.finish[pos]++;
+      // Final points distribution (for likely ranges).
+      const hist = e.ptsHist || (e.ptsHist = []);
+      hist[row.pts] = (hist[row.pts] || 0) + 1;
       inc(e, 'pts', row.pts);
       inc(e, 'gf', row.gf);
       inc(e, 'ga', row.ga);
@@ -261,7 +290,10 @@
   function matchesPerRun(job) {
     const n = job.teams.length;
     if (job.mode === 'h2h') return 1;
-    if (job.mode === 'league') return job.options.format === 'single' ? (n * (n - 1)) / 2 : n * (n - 1);
+    if (job.mode === 'league') {
+      if (job.fixtures) return Math.max(1, job.fixtures.length);
+      return job.options.format === 'single' ? (n * (n - 1)) / 2 : n * (n - 1);
+    }
     return Math.max(1, n - 1);
   }
 
