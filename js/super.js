@@ -7,10 +7,16 @@
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmtInt = (n) => Math.round(n).toLocaleString();
   const MS_PER_MATCH = 1.9; // rough single-core cost, refined from the last run
-  // Form adjustment for rest-of-season mode. Backtested on 2025-26: it made
-  // predictions worse after 5 matchdays and was roughly neutral at halfway,
-  // so it's off by default and kept small.
-  const FORM_K = 0.05;
+  // Form adjustment for rest-of-season mode (see js/season.js). Retro-tested
+  // on 2025-26: form measured from shots and shots on target improved
+  // predictions from matchday 5, 10 and halfway; form from points made them
+  // worse every time. So shots are the default and points are offered only
+  // for comparison.
+  const FORM_OPTIONS = {
+    shotmix: { metric: 'shotmix', weight: 1, label: 'Shots & shots on target (recommended)' },
+    points: { metric: 'points', weight: 1, label: 'Points (not recommended)' },
+    off: null,
+  };
   const FORM_RUNS = 200;
   const FIXTURE_PAGE = 40;
 
@@ -23,7 +29,7 @@
       h2h: { homeAdvantage: true, knockout: false },
       league: { format: 'double', topPlaces: 4, relegation: 3, homeAdvantage: true },
       cup: { draw: 'random' },
-      rest: { topPlaces: 4, relegation: 3, homeAdvantage: true, form: false },
+      rest: { topPlaces: 4, relegation: 3, homeAdvantage: true, form: 'shotmix' },
     },
     // Rest-of-season inputs (CSV text is remembered in this browser).
     rest: { results: null, fixtures: null, state: null, team: '', showAll: false },
@@ -273,9 +279,12 @@
           <div class="field"><label>Relegation places</label><input type="number" min="0" max="20" data-opt="relegation" value="${o.relegation}"></div>
         </div>
         <label class="check"><input type="checkbox" data-opt="homeAdvantage" ${o.homeAdvantage ? 'checked' : ''}> Home advantage</label>
-        <label class="check"><input type="checkbox" data-opt="form" ${o.form ? 'checked' : ''}> Adjust teams for form so far</label>
-        <p class="muted small-text">Form adjustment nudges teams up or down by how far their real results beat or missed what their ratings
-          expected. In tests on 2025-26 it made predictions worse after 5 matchdays and was roughly neutral at halfway, so it's off by default.</p>`;
+        <div class="field"><label>Adjust for form so far</label><select data-opt="form">
+          ${Object.entries(FORM_OPTIONS).map(([k, v]) => `<option value="${k}" ${o.form === k ? 'selected' : ''}>${v ? v.label : 'Off: ratings only'}</option>`).join('')}
+        </select></div>
+        <p class="muted small-text">Nudges each team up or down by how much it has out- or under-played its ratings, judged by
+          shots and shots on target for and against, which are much less luck-driven than points. Tested on 2025-26, this closed
+          half to nine-tenths of the gap to the bookmakers; judging form by points made predictions worse.</p>`;
     } else if (sc.mode === 'league') {
       html = `
         <div class="opt-grid">
@@ -317,7 +326,7 @@
       : { mode: sc.mode, teams: new Array(n), options: sc.options[sc.mode] };
     const runs = currentRuns();
     let matches = runs * OF.sim.matchesPerRun(fake);
-    if (rest && st && sc.options.rest.form) matches += FORM_RUNS * st.played.length;
+    if (rest && st && FORM_OPTIONS[sc.options.rest.form]) matches += FORM_RUNS * st.played.length;
     const secs = (matches * sc.msPerMatch) / 1000 / cores();
     const unit = unitFor(fake);
     let problem = sc.mode !== 'h2h' && n < 2 ? 'Add at least two teams.' : '';
@@ -383,13 +392,14 @@
     $('#sc-results').innerHTML = '';
     tickProgress();
     try {
-      if (job.view === 'rest' && sc.options.rest.form && run.season.played.length) {
+      const form = job.view === 'rest' ? FORM_OPTIONS[sc.options.rest.form] : null;
+      if (form && run.season.played.length) {
         // Phase 1: what the ratings expected from the games already played.
         run.phase = `Measuring form: replaying the ${run.season.played.length} games already played`;
         const pjob = { mode: 'league', teams: job.teams, options: job.options, seed: job.seed, fixtures: run.season.played.map((g) => [g.i, g.j]) };
         const p = await runPool(run, pjob, FORM_RUNS, null);
         if (sc.run !== run) return;
-        run.strengths = OF.season.strengthsFromResults(job.teams.length, run.season.played, p.fxOut, p.runs, FORM_K);
+        run.strengths = OF.season.strengthsFromResults(job.teams.length, run.season.played, p.fxOut, p.runs, form);
         job.strengths = run.strengths.map((x) => x.strength);
         run.phase = '';
         run.started = performance.now();
@@ -820,6 +830,11 @@
       ${tableHtml}`;
   }
 
+  const signed = (v) => {
+    const r = Math.round(v * 10) / 10;
+    return `${r > 0 ? '+' : ''}${Number.isInteger(r) ? r : r.toFixed(1)}`;
+  };
+
   function quantile(hist, total, q) {
     let acc = 0;
     for (let i = 0; i < hist.length; i++) {
@@ -872,9 +887,12 @@
       const list = run.strengths.map((x, i) => ({ ...x, name: job.teams[i].team.name })).sort((a, b) => b.strength - a.strength);
       form = `<div class="card">
         <h2>Form adjustment</h2>
-        <p class="muted small-text">Real points so far against what the ratings expected from the same games, shrunk towards zero while the sample is small.</p>
+        <p class="muted small-text">${run.strengths[0].metric === 'shotmix'
+          ? 'Each team\'s real shots and shots on target, for and against, compared with what its ratings expected from the same games (shots-on-target difference shown)'
+          : `Each team's real ${esc(run.strengths[0].label)} compared with what its ratings expected from the same games`},
+          turned into a strength change and shrunk towards zero while the sample is small.</p>
         <div class="form-chips">${list.map((x) => `<span class="team-chip">${esc(x.name)} <b class="${x.strength >= 1 ? 'up' : 'down'}">${x.strength >= 1 ? '+' : ''}${((x.strength - 1) * 100).toFixed(1)}%</b>
-          <span class="muted small-text">${x.real} pts vs ${x.expected.toFixed(1)} expected</span></span>`).join('')}</div>
+          <span class="muted small-text">${x.games ? `${signed(x.real)} ${esc(x.label)} vs ${signed(x.expected)} expected` : 'no shot data'}</span></span>`).join('')}</div>
       </div>`;
     }
 
@@ -893,9 +911,10 @@
     };
     let lastWeek = '';
     const bodyRows = list.map(({ f, k }) => {
-      const o = [0, 1, 2].map((q) => (agg.fxOut[k * 5 + q] || 0) / n);
-      const gh = (agg.fxOut[k * 5 + 3] || 0) / n;
-      const ga = (agg.fxOut[k * 5 + 4] || 0) / n;
+      const X = OF.sim.FX;
+      const o = [0, 1, 2].map((q) => (agg.fxOut[k * X + q] || 0) / n);
+      const gh = (agg.fxOut[k * X + 3] || 0) / n;
+      const ga = (agg.fxOut[k * X + 4] || 0) / n;
       const scores = agg.fxScores[k] ? Object.entries(agg.fxScores[k]).sort((a, b) => b[1] - a[1]) : [];
       const likely = scores.length ? `${scores[0][0]} <span class="muted small-text">${fmtPct(scores[0][1] / n)}</span>` : '';
       let head = '';

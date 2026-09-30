@@ -6,10 +6,15 @@
 // Retro-test on a finished season: pretend only the first N games have been
 // played, predict the rest, then score against what really happened:
 //
-//   node scripts/rest-of-season.js --results E0.csv --upto 50 --update 0,0.1,0.2
+//   node scripts/rest-of-season.js --results E0.csv --upto 50 --form none,points:1,sot:1
 //
-// --update k scales the per-team strength adjustment from over/under-
-// performing the ratings so far (0 = ratings only). A comma list compares values.
+// --form metric:weight adjusts each team's strength by how far its real
+// points / goal difference / shot difference / shots-on-target difference
+// so far beat what the ratings expected (metric = points|goals|shots|sot,
+// weight 0..1, "none" = ratings only). A comma list compares options.
+//
+// --sensitivity measures how much each of those signals moves per unit of
+// strength (the SENS constants in js/season.js).
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -34,7 +39,13 @@ const opt = (name, def) => {
 };
 const RUNS = parseInt(opt('runs', '1000'), 10);
 const UPTO = opt('upto', null);
-const K_LIST = String(opt('update', '0')).split(',').map(Number);
+const FORMS = String(opt('form', 'none')).split(',').map((x) => {
+  if (x === 'none') return null;
+  const [metric, weight] = x.split(':');
+  if (!OF.season.METRICS[metric] && metric !== 'shotmix') throw new Error(`Unknown form metric "${metric}"`);
+  return { metric, weight: weight === undefined ? 1 : Number(weight) };
+});
+const formLabel = (f) => (f ? `${f.metric}:${f.weight}` : 'none');
 const tuning = Object.fromEntries((opt('set', '') || '').split(',').filter(Boolean).map((kv) => kv.split('=')).map(([k, v]) => [k, Number(v)]));
 
 const db = OF.players.buildDatabase(OF.parseCSV(fs.readFileSync(path.join(root, 'players.csv'), 'utf8')));
@@ -71,24 +82,25 @@ const name = (i) => season.teams[i].name;
 
 (async () => {
   const t0 = Date.now();
-  // Phase 1: how many points did the ratings "expect" from the games already played?
+  if (args.includes('--sensitivity')) return sensitivity();
+  // Phase 1: what did the ratings expect from the games already played?
   let strengths = null;
-  const needUpdate = K_LIST.some((k) => k !== 0) && season.played.length;
+  const needForm = FORMS.some((f) => f && f.weight) && season.played.length;
   let phase1 = null;
-  if (needUpdate) {
+  if (needForm) {
     const runs1 = 200;
     phase1 = { runs: runs1, agg: await runPool({ mode: 'league', teams: cfgs, options: baseOptions, fixtures: season.played.map((g) => [g.i, g.j]), seed: 1 }, runs1) };
   }
   const results = [];
-  for (const k of K_LIST) {
-    strengths = k && phase1 ? OF.season.strengthsFromResults(n, season.played, phase1.agg.fxOut, phase1.runs, k) : null;
+  for (const form of FORMS) {
+    strengths = form && form.weight && phase1 ? OF.season.strengthsFromResults(n, season.played, phase1.agg.fxOut, phase1.runs, form) : null;
     const job = {
       mode: 'league', teams: cfgs, options: baseOptions, seed: 2627,
       start: season.table, fixtures: season.remaining.map((f) => [f.i, f.j]),
       strengths: strengths ? strengths.map((s) => s.strength) : null,
     };
     const agg = await runPool(job, RUNS);
-    results.push({ k, agg, strengths });
+    results.push({ form, agg, strengths });
   }
   const secs = (Date.now() - t0) / 1000;
   console.log(`\n${season.played.length} games played, ${season.remaining.length} to go · ${RUNS.toLocaleString()} simulations of the rest of the season · ${secs.toFixed(0)}s`);
@@ -108,13 +120,13 @@ function predictionReport({ agg, strengths }) {
   });
   console.log('\nNext fixtures');
   season.remaining.slice(0, 10).forEach((f, k) => {
-    const o = agg.fxOut.slice(k * 5, k * 5 + 5).map((c) => c / R);
+    const o = agg.fxOut.slice(k * OF.sim.FX, k * OF.sim.FX + 3).map((c) => c / R);
     const top = Object.entries(agg.fxScores[k]).sort((a, b) => b[1] - a[1])[0][0];
     const d = f.date ? f.date.toISOString().slice(0, 10) : '';
     console.log(`  ${d.padEnd(11)}${name(f.i).padStart(18)} v ${name(f.j).padEnd(18)} ${(o[0] * 100).toFixed(0).padStart(3)}% / ${(o[1] * 100).toFixed(0).padStart(2)}% / ${(o[2] * 100).toFixed(0).padStart(2)}%   likeliest ${top}`);
   });
   if (strengths) {
-    console.log('\nStrength adjustments from results so far:');
+    console.log(`\nStrength adjustments from ${strengths[0].label} so far:`);
     console.log('  ' + strengths.map((s, i) => `${name(i)} ${((s.strength - 1) * 100).toFixed(1)}%`).join(' · '));
   }
 }
@@ -152,14 +164,15 @@ function retroReport(results) {
     const errs = predPts.map((p, i) => Math.abs(p - finalPts[i]));
     lines.push({ label, rps: perGame, mae: avg(errs), rho: spearman(predPts), probs });
   };
-  for (const { k, agg } of results) {
+  for (const { form, agg } of results) {
     const R = agg.runs;
-    const perGame = avg(season.remaining.map((f, j) => rps([agg.fxOut[j * 5] / R, agg.fxOut[j * 5 + 1] / R, agg.fxOut[j * 5 + 2] / R], outcomes[j].res)));
+    const X = OF.sim.FX;
+    const perGame = avg(season.remaining.map((f, j) => rps([agg.fxOut[j * X] / R, agg.fxOut[j * X + 1] / R, agg.fxOut[j * X + 2] / R], outcomes[j].res)));
     const pred = season.teams.map((t) => agg.teams[t.key].pts / R);
     // Brier score over "finishes top 4" and "relegated" for every team.
     const brier = avg(season.teams.map((t, i) => ((agg.teams[t.key].top || 0) / R - (realTop4.has(i) ? 1 : 0)) ** 2
       + ((agg.teams[t.key].releg || 0) / R - (realBottom3.has(i) ? 1 : 0)) ** 2)) / 2;
-    add(k ? `Engine, form adjustment k=${k}` : 'Engine (ratings only)', perGame, pred, brier);
+    add(form && form.weight ? `Engine + form (${formLabel(form)})` : 'Engine (ratings only)', perGame, pred, brier);
   }
   // Bookmakers: real points so far + expected points from closing odds.
   const book = season.table.map((r) => r.pts);
@@ -178,4 +191,35 @@ function retroReport(results) {
   for (const l of lines) {
     console.log(`${l.label.padEnd(36)}${l.rps === null ? '       -' : l.rps.toFixed(4).padStart(8)}          ${l.mae.toFixed(1).padStart(6)} pts            ${l.rho.toFixed(3)}             ${l.probs === null ? '-' : l.probs.toFixed(3)}`);
   }
+}
+
+// How much does each form signal move, per game, when a team's strength
+// multiplier rises? Every fixture in the file is simulated twice: once with
+// all teams at 1.0, once with every other team at 1.05. Only games between a
+// boosted and an unboosted team are compared, from the boosted side's view.
+async function sensitivity() {
+  const all = season.played.concat(season.remaining).map((g) => [g.i, g.j]);
+  const boost = 0.05;
+  const boosted = season.teams.map((t, i) => i % 2 === 0);
+  const runs = 300;
+  const base = { mode: 'league', teams: cfgs, options: baseOptions, fixtures: all, seed: 7 };
+  const a = await runPool(base, runs);
+  const b = await runPool({ ...base, strengths: boosted.map((x) => (x ? 1 + boost : 1)) }, runs);
+  const X = OF.sim.FX;
+  const out = {};
+  for (const [metric, M] of Object.entries(OF.season.METRICS)) {
+    let sum = 0;
+    let count = 0;
+    all.forEach(([i, j], k) => {
+      if (boosted[i] === boosted[j]) return;
+      const home = boosted[i];
+      const oa = a.fxOut.slice(k * X, k * X + X).map((c) => c / runs);
+      const ob = b.fxOut.slice(k * X, k * X + X).map((c) => c / runs);
+      sum += M.exp(ob, home) - M.exp(oa, home);
+      count++;
+    });
+    out[metric] = sum / count / boost;
+  }
+  console.log(`\nSensitivity per +1.0 strength, from ${runs} runs of ${all.length} fixtures:`);
+  console.log(`  const SENS = { ${Object.entries(out).map(([k, v]) => `${k}: ${v.toFixed(1)}`).join(', ')} };`);
 }

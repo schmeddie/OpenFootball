@@ -63,7 +63,11 @@
       const j = index.get(r.AwayTeam);
       const hg = parseInt(r.FTHG, 10);
       const ag = parseInt(r.FTAG, 10);
-      played.push({ i, j, hg, ag, res: hg > ag ? 'H' : hg < ag ? 'A' : 'D', date: parseDate(r.Date), book: bookProbs(r) });
+      const num = (k) => (r[k] === undefined || r[k] === '' ? NaN : Number(r[k]));
+      played.push({
+        i, j, hg, ag, res: hg > ag ? 'H' : hg < ag ? 'A' : 'D', date: parseDate(r.Date), book: bookProbs(r),
+        hs: num('HS'), as: num('AS'), hst: num('HST'), ast: num('AST'),
+      });
       playedPairs.add(`${i}-${j}`);
     }
     // Remaining fixtures: from the fixture list if given (skipping anything
@@ -103,28 +107,75 @@
     return t;
   }
 
+  // Form signals, per game from one team's point of view: what really
+  // happened, and what the engine expected (from fxOut tallies of the same
+  // fixture, see OF.sim.FX). Shot-based signals are much less noisy than points.
+  const METRICS = {
+    points: {
+      label: 'pts',
+      real: (g, home) => (g.res === (home ? 'H' : 'A') ? 3 : g.res === 'D' ? 1 : 0),
+      exp: (o, home) => (home ? 3 * o[0] + o[1] : 3 * o[2] + o[1]),
+    },
+    goals: {
+      label: 'goal diff',
+      real: (g, home) => (home ? g.hg - g.ag : g.ag - g.hg),
+      exp: (o, home) => (home ? o[3] - o[4] : o[4] - o[3]),
+    },
+    shots: {
+      label: 'shot diff',
+      real: (g, home) => (home ? g.hs - g.as : g.as - g.hs),
+      exp: (o, home) => (home ? o[5] - o[6] : o[6] - o[5]),
+    },
+    sot: {
+      label: 'on-target diff',
+      real: (g, home) => (home ? g.hst - g.ast : g.ast - g.hst),
+      exp: (o, home) => (home ? o[7] - o[8] : o[8] - o[7]),
+    },
+  };
+
+  // How far each signal moves per game when a team's strength multiplier
+  // rises by 1.0 (i.e. 100%), measured with
+  // `node scripts/rest-of-season.js --results E0.csv --sensitivity`.
+  const SENS = { points: 9.7, goals: 14.6, shots: 78.4, sot: 52.9 };
+
   // Per-team ability multipliers from over/under-performance so far.
-  // fxOut: per played game [h, d, a, hg, ag] counts from simulating those
-  // same games `runs` times. Each team's points above expectation per game
-  // is shrunk towards zero by `prior` phantom games, then scaled by k.
-  function strengthsFromResults(n, played, fxOut, runs, k, prior = 10) {
+  // fxOut holds tallies from simulating the already-played games `runs`
+  // times. A team's surplus per game (real minus expected, centred on the
+  // league) is shrunk by `prior` phantom games, converted to a strength
+  // change via SENS, and scaled by `weight` (0 = ignore form).
+  function strengthsFromResults(n, played, fxOut, runs, { metric = 'points', weight = 1, prior = 10 } = {}) {
+    if (metric === 'shotmix') {
+      // Average of the shots and shots-on-target adjustments.
+      const a = strengthsFromResults(n, played, fxOut, runs, { metric: 'shots', weight, prior });
+      const b = strengthsFromResults(n, played, fxOut, runs, { metric: 'sot', weight, prior });
+      return a.map((x, t) => ({
+        strength: (x.strength + b[t].strength) / 2, real: b[t].real, expected: b[t].expected,
+        games: b[t].games, metric, label: 'on-target diff', shots: x,
+      }));
+    }
+    const M = METRICS[metric];
+    const X = OF.sim.FX;
     const real = new Array(n).fill(0);
     const exp = new Array(n).fill(0);
     const games = new Array(n).fill(0);
     played.forEach((g, idx) => {
-      const [h, d, a] = [fxOut[idx * 5], fxOut[idx * 5 + 1], fxOut[idx * 5 + 2]].map((c) => c / runs);
-      exp[g.i] += 3 * h + d;
-      exp[g.j] += 3 * a + d;
-      real[g.i] += g.res === 'H' ? 3 : g.res === 'D' ? 1 : 0;
-      real[g.j] += g.res === 'A' ? 3 : g.res === 'D' ? 1 : 0;
-      games[g.i]++;
-      games[g.j]++;
+      const o = fxOut.slice(idx * X, idx * X + X).map((c) => c / runs);
+      for (const [t, home] of [[g.i, true], [g.j, false]]) {
+        const r = M.real(g, home);
+        if (!Number.isFinite(r)) continue; // file has no shots columns for this game
+        real[t] += r;
+        exp[t] += M.exp(o, home);
+        games[t]++;
+      }
     });
+    const surplus = real.map((r, t) => (r - exp[t]) / (games[t] + prior));
+    const withGames = surplus.filter((x, t) => games[t]);
+    const mean = withGames.length ? withGames.reduce((a, b) => a + b, 0) / withGames.length : 0;
     return real.map((r, t) => ({
-      strength: 1 + (k * (r - exp[t])) / (games[t] + prior),
-      real: r, expected: exp[t], games: games[t],
+      strength: games[t] ? 1 + (weight * (surplus[t] - mean)) / SENS[metric] : 1,
+      real: r, expected: exp[t], games: games[t], metric, label: M.label,
     }));
   }
 
-  OF.season = { buildSeason, tableFrom, strengthsFromResults, parseDate, bookProbs };
+  OF.season = { buildSeason, tableFrom, strengthsFromResults, parseDate, bookProbs, METRICS, SENS };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

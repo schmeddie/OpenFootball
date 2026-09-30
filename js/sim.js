@@ -36,6 +36,11 @@
 
   const inc = (obj, key, by = 1) => (obj[key] = (obj[key] || 0) + by);
 
+  // Per-fixture tallies in agg.fxOut, FX slots per fixture:
+  // [home wins, draws, away wins, home goals, away goals, home shots,
+  //  away shots, home shots on target, away shots on target].
+  const FX = 9;
+
   function playMatch(job, home, away, seed, opts = {}) {
     const m = new OF.Match({
       home, away, seed,
@@ -143,7 +148,7 @@
     const seasonGoals = {};
     const fixtures = job.fixtures || allFixtures(n, double);
     const track = !!job.fixtures;
-    const fxOut = track ? agg.fxOut || (agg.fxOut = new Array(fixtures.length * 5).fill(0)) : null;
+    const fxOut = track ? agg.fxOut || (agg.fxOut = new Array(fixtures.length * FX).fill(0)) : null;
     const fxScores = track ? agg.fxScores || (agg.fxScores = {}) : null;
     const st = job.strengths;
     for (let k = 0; k < fixtures.length; k++) {
@@ -152,9 +157,14 @@
         const m = playMatch(job, teams[i], teams[j], rng.int(0, 2 ** 31), { strengths: st ? [st[i], st[j]] : null });
         if (track) {
           const [x, y] = [m.sides[0].score, m.sides[1].score];
-          fxOut[k * 5 + (x > y ? 0 : x === y ? 1 : 2)]++;
-          fxOut[k * 5 + 3] += x;
-          fxOut[k * 5 + 4] += y;
+          const o = k * FX;
+          fxOut[o + (x > y ? 0 : x === y ? 1 : 2)]++;
+          fxOut[o + 3] += x;
+          fxOut[o + 4] += y;
+          fxOut[o + 5] += m.sides[0].stats.shots;
+          fxOut[o + 6] += m.sides[1].stats.shots;
+          fxOut[o + 7] += m.sides[0].stats.sot;
+          fxOut[o + 8] += m.sides[1].stats.sot;
           const sc = fxScores[k] || (fxScores[k] = {});
           inc(sc, `${x}-${y}`);
         }
@@ -297,5 +307,5 @@
     return Math.max(1, n - 1);
   }
 
-  OF.sim = { createAgg, mergeAgg, simulateRun, matchesPerRun, cupRounds };
+  OF.sim = { createAgg, mergeAgg, simulateRun, matchesPerRun, cupRounds, FX };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

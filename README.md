@@ -76,27 +76,35 @@ covering every league; only the matching division is used. It:
 Without a fixtures file, the remaining games are worked out from which home/away pairings haven't been played yet.
 The files you load are remembered in the browser.
 
-An optional **form adjustment** nudges each team up or down by how much its real points so far beat or missed what
-its ratings expected. It's off by default because it didn't help in testing: retro-testing on 2025-26 (predicting
-from a point in the season, then scoring against what actually happened):
+A **form adjustment** (on by default) nudges each team's strength up or down by how much it has out- or under-played
+its ratings so far. It's measured from **shots and shots on target, for and against**, compared with what the engine
+expected from the same games, then shrunk towards zero while few games have been played. Shots are used rather than
+points because points are dominated by luck over a handful of games.
 
-| Predicting from | Model | Per-game RPS ↓ | Final points error ↓ | Table rank corr ↑ |
+Retro-tested on 2025-26 by predicting from a point in the season and scoring against what actually happened
+(per-game RPS, lower is better):
+
+| Predicting from | Ratings only | + form from points | **+ form from shots (default)** | Bookmakers (closing odds) |
 |---|---|---|---|---|
-| Matchday 5 | Engine (ratings only) | 0.2108 | 7.6 pts | 0.69 |
-| | Engine + form adjustment (k=0.1) | 0.2188 | 8.4 pts | 0.62 |
-| | Bookmakers (closing odds) | 0.2067 | 6.3 pts | 0.75 |
-| | Current points per game × 38 | – | 17.6 pts | 0.42 |
-| Halfway | Engine (ratings only) | 0.2234 | 5.3 pts | 0.79 |
-| | Engine + form adjustment (k=0.05) | 0.2218 | 5.6 pts | 0.83 |
-| | Bookmakers (closing odds) | 0.2089 | 4.0 pts | 0.85 |
-| | Current points per game × 38 | – | 6.9 pts | 0.82 |
+| Matchday 5 | 0.2113 | 0.2187 | **0.2078** | 0.2067 |
+| Matchday 10 | 0.2126 | 0.2181 | **0.2082** | 0.2040 |
+| Halfway | 0.2241 | 0.2269 | **0.2101** | 0.2089 |
 
-Bookmaker odds exist match by match, so the bookmaker "final points" here are real points so far plus expected
-points from each remaining game's closing odds.
+Average error in each team's final points: from matchday 5, 7.7 → 7.4 (bookmakers 6.3); from halfway, 5.4 → 4.2
+(bookmakers 4.0). Shot-based form closes half to nine-tenths of the gap to the betting market, while points-based form
+makes predictions worse every time.
+
+Caveats:
+- **One season, about ten settings tried.** The chosen setting may be slightly flattered by the choice. The simplest
+  consistent option (equal weight on shots and shots on target, weight 1) was picked rather than the best-scoring one
+  at any single checkpoint.
+- **Partly tuned on the same data.** The engine was tuned on the first half of 2025-26, so the matchday-5 and
+  matchday-10 tests reuse some of those games. The halfway test does not.
 
 ```sh
-node scripts/rest-of-season.js --results E0.csv [--fixtures fixtures.csv] --runs 1000   # predict from real results
-node scripts/rest-of-season.js --results E0.csv --upto 50 --update 0,0.1                 # retro-test a finished season
+node scripts/rest-of-season.js --results E0.csv [--fixtures fixtures.csv] --form shotmix:1   # predict from real results
+node scripts/rest-of-season.js --results E0.csv --upto 50 --form none,points:1,shotmix:1 # retro-test a finished season
+node scripts/rest-of-season.js --results E0.csv --sensitivity                              # re-measure form signal scales
 ```
 
 ## Accuracy (backtest)
