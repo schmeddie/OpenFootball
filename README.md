@@ -103,4 +103,5 @@ node scripts/backtest.js --half 1 --summary --set duel=32,homeAdvantage=5   # on
 node scripts/simulate.js "Real Madrid" "FC Barcelona"          # one match with commentary
 node scripts/simulate.js "Chelsea|Premier League" "Arsenal" 42 # "|League" disambiguates, 42 = seed
 node scripts/simulate.js --calibrate 500                       # aggregate stats across random matches
+node scripts/season.js "Premier League" --runs 1000            # predict a season: title / top 4 / relegation odds
 ```

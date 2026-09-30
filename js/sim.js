@@ -165,6 +165,11 @@
       if (pos < top) inc(e, 'top');
       if (pos >= n - rel) inc(e, 'releg');
     });
+    // Shape of the table: average points by finishing place, and the spread.
+    const place = agg.placePts || (agg.placePts = new Array(n).fill(0));
+    table.forEach((row, pos) => (place[pos] += row.pts));
+    const mean = table.reduce((s, r) => s + r.pts, 0) / n;
+    inc(agg, 'ptsSdSum', Math.sqrt(table.reduce((s, r) => s + (r.pts - mean) ** 2, 0) / n));
     // Points needed: what the champion and the first team outside the top places got.
     inc(agg, 'championPts', table[0].pts);
     if (rel && n - rel - 1 >= 0) inc(agg, 'safetyPts', table[n - rel - 1].pts);
